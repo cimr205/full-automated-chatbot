@@ -43,9 +43,12 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/executor
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3:8b}
-      - MAX_TASK_STEPS=${MAX_TASK_STEPS:-20}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen2.5vl}
+      - MAX_TASK_STEPS=${MAX_TASK_STEPS:-25}
       - HUMAN_REPLY_TIMEOUT=${HUMAN_REPLY_TIMEOUT:-300}
     volumes:
       - screenshots:/tmp/screenshots
