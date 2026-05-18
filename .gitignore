@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+/tmp/
+/browser-data/
+*.png
+*.jpg
+.DS_Store
+venv/
+.venv/
+dist/
+*.egg-info/
+node_modules/
