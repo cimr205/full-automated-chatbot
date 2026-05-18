@@ -35,6 +35,8 @@ services:
     ports:
       - "8001:8000"
 
+  # ── Railway services (API + Telegram bot) ─────────────────────────────────
+  # These run on Railway. Start locally only for testing.
   api:
     build:
       context: ..
@@ -52,7 +54,6 @@ services:
       - HUMAN_REPLY_TIMEOUT=${HUMAN_REPLY_TIMEOUT:-300}
     volumes:
       - screenshots:/tmp/screenshots
-      - browser_data:/tmp/browser-data
     depends_on:
       redis:
         condition: service_healthy
@@ -74,6 +75,31 @@ services:
     depends_on:
       - api
       - redis
+
+  # ── VPS service (browser worker + Playwright) ─────────────────────────────
+  # Run this on your VPS alongside Ollama.
+  browser-worker:
+    build:
+      context: ..
+      dockerfile: workers/browser/Dockerfile
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/executor
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3:8b}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen2.5vl}
+      - MAX_TASK_STEPS=${MAX_TASK_STEPS:-25}
+      - HUMAN_REPLY_TIMEOUT=${HUMAN_REPLY_TIMEOUT:-300}
+      - BROWSER_DATA_DIR=/tmp/browser-data
+    volumes:
+      - screenshots:/tmp/screenshots
+      - browser_data:/tmp/browser-data
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   redis_data:
