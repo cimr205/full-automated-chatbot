@@ -13,8 +13,14 @@ import httpx
 log = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# Auto-detect provider from key prefix
+if GROQ_API_KEY.startswith("xai-"):
+    AI_URL = "https://api.x.ai/v1/chat/completions"
+    AI_MODEL = os.getenv("GROQ_MODEL", "grok-3-mini")
+else:
+    AI_URL = "https://api.groq.com/openai/v1/chat/completions"
+    AI_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3:8b")
@@ -25,7 +31,7 @@ class OllamaClient:
 
     async def reason(self, prompt: str, model: str = None) -> str:
         if GROQ_API_KEY:
-            return await self._groq(prompt, model or GROQ_MODEL)
+            return await self._groq(prompt, model or AI_MODEL)
         if OLLAMA_URL:
             return await self._ollama(prompt, model or OLLAMA_MODEL)
         log.error("No AI provider configured — set GROQ_API_KEY or OLLAMA_URL")
@@ -51,7 +57,7 @@ class OllamaClient:
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
-                    GROQ_URL,
+                    AI_URL,
                     headers={
                         "Authorization": f"Bearer {GROQ_API_KEY}",
                         "Content-Type": "application/json",
