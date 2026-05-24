@@ -306,7 +306,93 @@ async def cmd_findleads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
-    await update.message.reply_text("Use /help for available commands.")
+    text = update.message.text.strip()
+    await update.message.chat.send_action("typing")
+
+    # Ask AI to classify and respond
+    ai_response = await _ai_chat(text)
+
+    if ai_response.get("type") == "task":
+        # Auto-create task from natural language
+        desc = ai_response.get("description", text)
+        try:
+            data = await api_post("/tasks", {"description": desc})
+            task_id = data["task_id"]
+            reply = (
+                f"{ai_response.get('reply', 'Opgave oprettet.')}\n\n"
+                f"ID: `{task_id}`\n"
+                f"Følg med: /status {task_id}"
+            )
+            await update.message.reply_text(reply, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"Kunne ikke oprette opgave: {e}")
+
+    elif ai_response.get("type") == "goal":
+        desc = ai_response.get("description", text)
+        recurring = ai_response.get("recurring", False)
+        try:
+            data = await api_post("/goals", {"description": desc, "recurring": recurring})
+            reply = (
+                f"{ai_response.get('reply', 'Mål oprettet.')}\n\n"
+                f"ID: `{data['goal_id']}`"
+            )
+            await update.message.reply_text(reply, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"Kunne ikke oprette mål: {e}")
+
+    else:
+        await update.message.reply_text(ai_response.get("reply", "Hvad kan jeg hjælpe med?"))
+
+
+async def _ai_chat(user_message: str) -> dict:
+    """Use AI to understand free text and determine action type."""
+    import httpx as _httpx
+
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if not groq_key:
+        return {"type": "chat", "reply": "Sæt GROQ_API_KEY for at aktivere AI chat."}
+
+    if groq_key.startswith("xai-"):
+        url = "https://api.x.ai/v1/chat/completions"
+        model = "grok-3-mini"
+    else:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        model = "llama3-8b-8192"
+
+    prompt = f"""Du er en AI assistent der hjælper med at styre et autonomt execution system.
+
+Brugeren skriver: "{user_message}"
+
+Analyser beskeden og svar med JSON:
+
+Hvis brugeren beder om en konkret opgave (research, søg, find, gå til website, skriv noget):
+{{"type": "task", "description": "præcis opgavebeskrivelse på engelsk", "reply": "Dit svar på dansk"}}
+
+Hvis brugeren sætter et langsigtet mål (daglig overvågning, find leads løbende, monitor):
+{{"type": "goal", "description": "mål beskrivelse på engelsk", "recurring": true/false, "reply": "Dit svar på dansk"}}
+
+Ellers (spørgsmål, snak, status):
+{{"type": "chat", "reply": "Dit svar på dansk - max 3 sætninger"}}
+
+Svar KUN med JSON:"""
+
+    try:
+        async with _httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 200},
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0:
+                return json.loads(content[start:end])
+    except Exception as e:
+        log.error("AI chat error: %s", e)
+
+    return {"type": "chat", "reply": "Jeg forstod ikke helt. Prøv /task <opgave> eller /goal <mål>."}
 
 
 # ── Notification listener ─────────────────────────────────────────────────────
