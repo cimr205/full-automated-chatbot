@@ -194,6 +194,14 @@ class Supervisor:
     async def _update(self, task: dict):
         await self.queue.update_task_state(task)
         await self.db.save_task(task)
+        try:
+            await self.redis.publish("ws:events", json.dumps({
+                "type": "task_update",
+                "task_id": task["task_id"],
+                "status": task["status"],
+            }))
+        except Exception:
+            pass
 
     async def _notify(self, task_id: str, message: str):
         await self.redis.publish("supervisor:notifications", json.dumps({

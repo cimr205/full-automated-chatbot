@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Execution System — Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0a0f;
+    color: #e2e8f0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: #0d0d14;
+    border-bottom: 1px solid #1e1e2e;
+    flex-shrink: 0;
+  }
+  .logo { font-size: 14px; font-weight: 700; color: #7c3aed; letter-spacing: 0.05em; }
+  .status-bar { display: flex; gap: 20px; align-items: center; }
+  .indicator { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #94a3b8; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #374151; }
+  .dot.green { background: #10b981; box-shadow: 0 0 6px #10b981; }
+  .dot.yellow { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+  .dot.red { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+  .ws-status { font-size: 11px; color: #4b5563; }
+  .ws-status.connected { color: #10b981; }
+
+  /* ── Layout ── */
+  .grid {
+    display: grid;
+    grid-template-columns: 280px 1fr 300px;
+    grid-template-rows: 1fr 220px;
+    gap: 1px;
+    background: #1e1e2e;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .panel {
+    background: #0a0a0f;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 10px 14px;
+    background: #0d0d14;
+    border-bottom: 1px solid #1e1e2e;
+    font-size: 11px;
+    font-weight: 600;
+    color: #7c3aed;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .panel-body { flex: 1; overflow-y: auto; padding: 10px; }
+  .panel-body::-webkit-scrollbar { width: 4px; }
+  .panel-body::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 2px; }
+
+  /* ── Tasks ── */
+  .task-item {
+    padding: 10px;
+    border: 1px solid #1e1e2e;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .task-item:hover { border-color: #7c3aed; }
+  .task-item.active { border-color: #7c3aed; background: #0d0b1a; }
+  .task-id { font-size: 10px; color: #4b5563; margin-bottom: 4px; }
+  .task-desc { font-size: 12px; color: #cbd5e1; line-height: 1.4; margin-bottom: 6px; }
+  .task-meta { display: flex; align-items: center; gap: 8px; }
+  .badge {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-running { background: #1d4ed8; color: #93c5fd; }
+  .badge-queued { background: #374151; color: #9ca3af; }
+  .badge-completed { background: #064e3b; color: #6ee7b7; }
+  .badge-failed { background: #7f1d1d; color: #fca5a5; }
+  .badge-waiting { background: #78350f; color: #fcd34d; }
+  .badge-retrying { background: #4c1d95; color: #c4b5fd; }
+
+  /* ── Live logs ── */
+  .log-container {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+  .log-line {
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 1px 0;
+    color: #94a3b8;
+    border-bottom: 1px solid #0d0d14;
+    word-break: break-all;
+  }
+  .log-line.new { color: #e2e8f0; }
+  .log-line .ts { color: #4b5563; margin-right: 8px; font-size: 10px; }
+  .log-line.system { color: #7c3aed; }
+  .log-line.error { color: #ef4444; }
+  .log-line.success { color: #10b981; }
+  .log-empty { color: #374151; font-size: 12px; padding: 20px; text-align: center; }
+
+  /* ── Goals ── */
+  .goal-item {
+    padding: 10px;
+    border: 1px solid #1e1e2e;
+    border-radius: 6px;
+    margin-bottom: 8px;
+  }
+  .goal-id { font-size: 10px; color: #4b5563; margin-bottom: 4px; }
+  .goal-desc { font-size: 12px; color: #cbd5e1; line-height: 1.4; margin-bottom: 6px; }
+  .goal-meta { display: flex; gap: 6px; align-items: center; }
+  .priority { font-size: 10px; color: #7c3aed; }
+  .recurring { font-size: 10px; color: #f59e0b; }
+
+  /* ── Screenshot ── */
+  .screenshot-panel {
+    grid-column: 1 / 2;
+  }
+  .screenshot-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #050508;
+  }
+  .screenshot-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #374151;
+    font-size: 12px;
+  }
+
+  /* ── Health bar ── */
+  .health-panel {
+    grid-column: 3;
+    grid-row: 2;
+  }
+  .health-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid #0d0d14;
+    font-size: 12px;
+  }
+  .health-label { color: #94a3b8; }
+  .health-val { color: #e2e8f0; font-weight: 600; }
+  .health-val.ok { color: #10b981; }
+  .health-val.err { color: #ef4444; }
+
+  .count-badge {
+    background: #1e1e2e;
+    color: #94a3b8;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+  }
+
+  /* scrollbar for log */
+  .log-body { padding: 6px 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">⬡ EXECUTION SYSTEM</div>
+  <div class="status-bar">
+    <div class="indicator"><div class="dot" id="dot-api"></div> API</div>
+    <div class="indicator"><div class="dot" id="dot-redis"></div> Redis</div>
+    <div class="indicator"><div class="dot" id="dot-db"></div> Postgres</div>
+    <div class="indicator"><div class="dot" id="dot-queue"></div> <span id="queue-count">0</span> queued</div>
+    <div class="indicator"><div class="dot" id="dot-active"></div> <span id="active-label">idle</span></div>
+  </div>
+  <div class="ws-status" id="ws-status">● disconnected</div>
+</header>
+
+<div class="grid">
+
+  <!-- Tasks panel -->
+  <div class="panel">
+    <div class="panel-header">
+      Tasks
+      <span class="count-badge" id="task-count">0</span>
+    </div>
+    <div class="panel-body" id="task-list">
+      <div class="log-empty">Ingen tasks endnu</div>
+    </div>
+  </div>
+
+  <!-- Live log -->
+  <div class="panel log-container">
+    <div class="panel-header">
+      Live Log
+      <span id="selected-task" style="color:#4b5563;font-weight:400">— vælg en task</span>
+    </div>
+    <div class="panel-body log-body" id="log-list">
+      <div class="log-empty">Vælg en task for at se logs</div>
+    </div>
+  </div>
+
+  <!-- Goals panel -->
+  <div class="panel">
+    <div class="panel-header">
+      Goals
+      <span class="count-badge" id="goal-count">0</span>
+    </div>
+    <div class="panel-body" id="goal-list">
+      <div class="log-empty">Ingen aktive goals</div>
+    </div>
+  </div>
+
+  <!-- Screenshot -->
+  <div class="panel screenshot-panel">
+    <div class="panel-header">Browser Screenshot</div>
+    <div class="panel-body" style="padding:0">
+      <div class="screenshot-empty" id="screenshot-empty">Ingen aktiv browser session</div>
+      <img id="screenshot-img" class="screenshot-img" style="display:none" />
+    </div>
+  </div>
+
+  <!-- Health -->
+  <div class="panel health-panel">
+    <div class="panel-header">System Health</div>
+    <div class="panel-body">
+      <div class="health-item"><span class="health-label">Queue</span><span class="health-val" id="h-queue">—</span></div>
+      <div class="health-item"><span class="health-label">Active task</span><span class="health-val" id="h-active">—</span></div>
+      <div class="health-item"><span class="health-label">Active goals</span><span class="health-val" id="h-goals">—</span></div>
+      <div class="health-item"><span class="health-label">Last update</span><span class="health-val" id="h-ts">—</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const API = window.location.origin;
+  let selectedTaskId = null;
+  let ws = null;
+  let tasks = [];
+  let goals = [];
+
+  // ── WebSocket ──────────────────────────────────────────────
+  function connectWS() {
+    const wsUrl = API.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/dashboard';
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      document.getElementById('ws-status').textContent = '● connected';
+      document.getElementById('ws-status').className = 'ws-status connected';
+    };
+
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'task_update') refreshTasks();
+      if (msg.type === 'log') appendLog(msg);
+      if (msg.type === 'screenshot') showScreenshot(msg.url);
+      if (msg.type === 'health') updateHealth(msg);
+    };
+
+    ws.onclose = () => {
+      document.getElementById('ws-status').textContent = '● disconnected';
+      document.getElementById('ws-status').className = 'ws-status';
+      setTimeout(connectWS, 3000);
+    };
+  }
+
+  // ── Polling fallback ───────────────────────────────────────
+  async function poll() {
+    await refreshTasks();
+    await refreshGoals();
+    await refreshHealth();
+    if (selectedTaskId) await refreshLogs(selectedTaskId);
+  }
+
+  async function refreshTasks() {
+    try {
+      const r = await fetch(API + '/tasks');
+      tasks = await r.json();
+      renderTasks();
+    } catch(e) {
+      setDot('dot-api', 'red');
+    }
+  }
+
+  async function refreshGoals() {
+    try {
+      const r = await fetch(API + '/goals?status=active');
+      goals = await r.json();
+      renderGoals();
+    } catch(e) {}
+  }
+
+  async function refreshHealth() {
+    try {
+      const r = await fetch(API + '/health');
+      const h = await r.json();
+      updateHealth(h);
+      setDot('dot-api', 'green');
+    } catch(e) {
+      setDot('dot-api', 'red');
+    }
+  }
+
+  async function refreshLogs(taskId) {
+    try {
+      const r = await fetch(API + '/tasks/' + taskId);
+      const task = await r.json();
+      renderLogs(task.logs || []);
+    } catch(e) {}
+  }
+
+  // ── Render ─────────────────────────────────────────────────
+  function renderTasks() {
+    const el = document.getElementById('task-list');
+    document.getElementById('task-count').textContent = tasks.length;
+
+    if (!tasks.length) {
+      el.innerHTML = '<div class="log-empty">Ingen tasks endnu</div>';
+      return;
+    }
+
+    el.innerHTML = tasks.slice(0, 30).map(t => `
+      <div class="task-item ${t.task_id === selectedTaskId ? 'active' : ''}"
+           onclick="selectTask('${t.task_id}')">
+        <div class="task-id">${t.task_id}</div>
+        <div class="task-desc">${(t.description || '').slice(0, 80)}${t.description?.length > 80 ? '…' : ''}</div>
+        <div class="task-meta">
+          <span class="badge badge-${t.status}">${t.status}</span>
+          ${t.retry_count > 0 ? `<span style="font-size:10px;color:#6b7280">retry ${t.retry_count}</span>` : ''}
+        </div>
+      </div>
+    `).join('');
+
+    // Update active indicator
+    const running = tasks.find(t => t.status === 'running');
+    const waiting = tasks.find(t => t.status === 'waiting_for_human');
+    if (running) {
+      setDot('dot-active', 'green');
+      document.getElementById('active-label').textContent = 'running';
+    } else if (waiting) {
+      setDot('dot-active', 'yellow');
+      document.getElementById('active-label').textContent = 'waiting';
+    } else {
+      setDot('dot-active', '');
+      document.getElementById('active-label').textContent = 'idle';
+    }
+
+    const queued = tasks.filter(t => t.status === 'queued').length;
+    document.getElementById('queue-count').textContent = queued;
+    setDot('dot-queue', queued > 0 ? 'yellow' : '');
+  }
+
+  function renderGoals() {
+    const el = document.getElementById('goal-list');
+    document.getElementById('goal-count').textContent = goals.length;
+
+    if (!goals.length) {
+      el.innerHTML = '<div class="log-empty">Ingen aktive goals</div>';
+      return;
+    }
+
+    el.innerHTML = goals.map(g => `
+      <div class="goal-item">
+        <div class="goal-id">${g.goal_id}</div>
+        <div class="goal-desc">${(g.description || '').slice(0, 100)}</div>
+        <div class="goal-meta">
+          <span class="priority">p${g.priority}</span>
+          ${g.recurring ? '<span class="recurring">↺ recurring</span>' : ''}
+          <span style="font-size:10px;color:#4b5563">runs: ${g.run_count || 0}</span>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function renderLogs(logs) {
+    const el = document.getElementById('log-list');
+    if (!logs.length) {
+      el.innerHTML = '<div class="log-empty">Ingen logs endnu</div>';
+      return;
+    }
+    el.innerHTML = logs.map((l, i) => {
+      const cls = l.includes('ERROR') ? 'error' : l.includes('complete') ? 'success' : l.includes('[SYS]') ? 'system' : '';
+      return `<div class="log-line ${cls} ${i === logs.length-1 ? 'new' : ''}">${escHtml(l)}</div>`;
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function appendLog(msg) {
+    if (msg.task_id !== selectedTaskId) return;
+    const el = document.getElementById('log-list');
+    const line = document.createElement('div');
+    line.className = 'log-line new';
+    line.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('da')}</span>${escHtml(msg.message)}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function updateHealth(h) {
+    document.getElementById('h-queue').textContent = h.queue_length ?? '—';
+    document.getElementById('h-queue').className = 'health-val ok';
+    document.getElementById('h-active').textContent = h.active_task || 'none';
+    document.getElementById('h-active').className = 'health-val ' + (h.active_task ? 'ok' : '');
+    document.getElementById('h-goals').textContent = h.active_goals ?? '—';
+    document.getElementById('h-ts').textContent = new Date().toLocaleTimeString('da');
+    setDot('dot-redis', 'green');
+    setDot('dot-db', 'green');
+  }
+
+  function showScreenshot(url) {
+    const img = document.getElementById('screenshot-img');
+    const empty = document.getElementById('screenshot-empty');
+    img.src = url + '?t=' + Date.now();
+    img.style.display = 'block';
+    empty.style.display = 'none';
+  }
+
+  function selectTask(id) {
+    selectedTaskId = id;
+    document.getElementById('selected-task').textContent = id;
+    renderTasks();
+    refreshLogs(id);
+  }
+
+  function setDot(id, color) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'dot' + (color ? ' ' + color : '');
+  }
+
+  function escHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Boot ──────────────────────────────────────────────────
+  poll();
+  setInterval(poll, 3000);
+  connectWS();
+</script>
+</body>
+</html>
