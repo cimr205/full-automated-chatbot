@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -22,6 +23,16 @@ API_URL = os.getenv("API_URL", "http://api:8000")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
 redis_client: aioredis.Redis = None
+
+
+async def _ws_event(event_type: str, text: str, task_id: str = None):
+    try:
+        payload = {"type": event_type, "text": text[:300], "ts": datetime.utcnow().isoformat()}
+        if task_id:
+            payload["task_id"] = task_id
+        await redis_client.publish("ws:events", json.dumps(payload))
+    except Exception:
+        pass
 
 
 async def auth(update: Update) -> bool:
@@ -220,6 +231,23 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /cancel <goal_id>")
+        return
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=10) as client:
+            resp = await client.delete(f"{API_URL}/goals/{ctx.args[0]}")
+            resp.raise_for_status()
+        await _ws_event("telegram_out", f"Goal cancelled: {ctx.args[0]}")
+        await update.message.reply_text(f"`{ctx.args[0]}` cancelled.", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
@@ -308,16 +336,16 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     text = update.message.text.strip()
     await update.message.chat.send_action("typing")
+    await _ws_event("telegram_in", f"User: {text}")
 
-    # Ask AI to classify and respond
     ai_response = await _ai_chat(text)
 
     if ai_response.get("type") == "task":
-        # Auto-create task from natural language
         desc = ai_response.get("description", text)
         try:
             data = await api_post("/tasks", {"description": desc})
             task_id = data["task_id"]
+            await _ws_event("telegram_out", f"Task queued: {desc[:80]}", task_id)
             reply = (
                 f"{ai_response.get('reply', 'Opgave oprettet.')}\n\n"
                 f"ID: `{task_id}`\n"
@@ -332,6 +360,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         recurring = ai_response.get("recurring", False)
         try:
             data = await api_post("/goals", {"description": desc, "recurring": recurring})
+            await _ws_event("telegram_out", f"Goal created: {desc[:80]}", data["goal_id"])
             reply = (
                 f"{ai_response.get('reply', 'Mål oprettet.')}\n\n"
                 f"ID: `{data['goal_id']}`"
@@ -341,7 +370,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Kunne ikke oprette mål: {e}")
 
     else:
-        await update.message.reply_text(ai_response.get("reply", "Hvad kan jeg hjælpe med?"))
+        reply_text = ai_response.get("reply", "Hvad kan jeg hjælpe med?")
+        await _ws_event("telegram_out", f"Bot: {reply_text}")
+        await update.message.reply_text(reply_text)
 
 
 async def _ai_chat(user_message: str) -> dict:
@@ -445,11 +476,13 @@ async def listen_notifications(bot):
             channel = message["channel"]
 
             if channel == "supervisor:notifications":
+                msg_text = data["message"]
                 await bot.send_message(
                     chat_id=ALLOWED_CHAT_ID,
-                    text=f"[SYS] `{data['task_id']}`\n{data['message']}",
+                    text=f"[SYS] `{data['task_id']}`\n{msg_text}",
                     parse_mode="Markdown",
                 )
+                await _ws_event("telegram_out", f"[SYS] {msg_text[:150]}", data.get("task_id"))
 
             elif channel == "browser:screenshots":
                 task_id = data["task_id"]
@@ -491,7 +524,7 @@ async def main():
         ("tasks", cmd_tasks), ("reply", cmd_reply),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),
         ("goals", cmd_goals), ("pause", cmd_pause), ("resume", cmd_resume),
-        ("health", cmd_health),
+        ("cancel", cmd_cancel), ("health", cmd_health),
         ("context", cmd_context), ("setcontext", cmd_setcontext),
         ("lead", cmd_lead), ("findleads", cmd_findleads),
     ]

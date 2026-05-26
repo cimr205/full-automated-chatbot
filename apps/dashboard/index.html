@@ -119,6 +119,8 @@
   .log-line.system { color: #7c3aed; }
   .log-line.error { color: #ef4444; }
   .log-line.success { color: #10b981; }
+  .log-line.telegram-in { color: #38bdf8; }
+  .log-line.telegram-out { color: #a78bfa; }
   .log-empty { color: #374151; font-size: 12px; padding: 20px; text-align: center; }
 
   /* ── Goals ── */
@@ -213,11 +215,15 @@
   <!-- Live log -->
   <div class="panel log-container">
     <div class="panel-header">
-      Live Log
-      <span id="selected-task" style="color:#4b5563;font-weight:400">— vælg en task</span>
+      Activity Feed
+      <span id="selected-task" style="color:#4b5563;font-weight:400;font-size:10px">
+        <span style="color:#38bdf8">■</span> tg-in &nbsp;
+        <span style="color:#a78bfa">■</span> tg-out &nbsp;
+        <span style="color:#7c3aed">■</span> system
+      </span>
     </div>
     <div class="panel-body log-body" id="log-list">
-      <div class="log-empty">Vælg en task for at se logs</div>
+      <div class="log-empty">Venter på aktivitet…</div>
     </div>
   </div>
 
@@ -273,10 +279,12 @@
 
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'task_update') refreshTasks();
+      if (msg.type === 'task_update') { refreshTasks(); appendActivity(`[TASK] ${msg.task_id} → ${msg.status}`, 'system'); }
       if (msg.type === 'log') appendLog(msg);
       if (msg.type === 'screenshot') showScreenshot(msg.url);
       if (msg.type === 'health') updateHealth(msg);
+      if (msg.type === 'telegram_in') appendActivity(msg.text, 'telegram-in');
+      if (msg.type === 'telegram_out') appendActivity(msg.text, 'telegram-out');
     };
 
     ws.onclose = () => {
@@ -414,6 +422,19 @@
     line.className = 'log-line new';
     line.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('da')}</span>${escHtml(msg.message)}`;
     el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function appendActivity(text, cls = '') {
+    const el = document.getElementById('log-list');
+    const empty = el.querySelector('.log-empty');
+    if (empty) empty.remove();
+    const line = document.createElement('div');
+    line.className = `log-line ${cls} new`;
+    line.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('da')}</span>${escHtml(text)}`;
+    el.appendChild(line);
+    const all = el.querySelectorAll('.log-line');
+    if (all.length > 300) all[0].remove();
     el.scrollTop = el.scrollHeight;
   }
 
