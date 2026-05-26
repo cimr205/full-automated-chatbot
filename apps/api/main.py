@@ -3,13 +3,42 @@ import uuid
 import json
 import asyncio
 import logging
+import pathlib
 from datetime import datetime
 from typing import Optional
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+DASHBOARD_HTML = pathlib.Path(__file__).parent.parent / "dashboard" / "index.html"
+
+
+class ConnectionManager:
+    def __init__(self):
+        self._connections: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self._connections.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self._connections:
+            self._connections.remove(ws)
+
+    async def broadcast(self, data: dict):
+        dead = []
+        for ws in self._connections:
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+manager = ConnectionManager()
 
 from core.queue.task_queue import TaskQueue
 from core.supervisor.supervisor import Supervisor
@@ -243,3 +272,45 @@ async def health():
         "active_task": active,
         "active_goals": len(goals),
     }
+
+
+@app.get("/")
+async def dashboard():
+    if DASHBOARD_HTML.exists():
+        return FileResponse(str(DASHBOARD_HTML), media_type="text/html")
+    return {"service": "Autonomous Execution System v2", "dashboard": "not found"}
+
+
+@app.websocket("/ws/dashboard")
+async def ws_dashboard(ws: WebSocket):
+    await manager.connect(ws)
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe("ws:events")
+
+    async def _redis_listener():
+        try:
+            async for msg in pubsub.listen():
+                if msg["type"] == "message":
+                    try:
+                        await ws.send_json(json.loads(msg["data"]))
+                    except Exception:
+                        break
+        except Exception:
+            pass
+
+    listener = asyncio.create_task(_redis_listener())
+    try:
+        while True:
+            try:
+                h = await health()
+                await ws.send_json({"type": "health", **h})
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        listener.cancel()
+        await pubsub.unsubscribe("ws:events")
+        await pubsub.aclose()
+        manager.disconnect(ws)
