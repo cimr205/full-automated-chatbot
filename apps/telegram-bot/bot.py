@@ -335,131 +335,164 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     text = update.message.text.strip()
+    chat_id = str(update.effective_chat.id)
     await update.message.chat.send_action("typing")
     await _ws_event("telegram_in", f"User: {text}")
 
-    ai_response = await _ai_chat(text)
+    result = await _ai_chat(text, chat_id)
 
-    if ai_response.get("type") == "task":
-        desc = ai_response.get("description", text)
+    # Create task if AI flagged one
+    if result.get("action") == "task":
         try:
-            data = await api_post("/tasks", {"description": desc})
+            data = await api_post("/tasks", {"description": result["description"]})
             task_id = data["task_id"]
-            await _ws_event("telegram_out", f"Task queued: {desc[:80]}", task_id)
-            reply = (
-                f"{ai_response.get('reply', 'Opgave oprettet.')}\n\n"
-                f"ID: `{task_id}`\n"
-                f"Følg med: /status {task_id}"
-            )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+            await _ws_event("telegram_out", f"Task queued: {result['description'][:80]}", task_id)
+            suffix = f"\n\n`{task_id}` — /status {task_id}"
+            await _send_long(update, result["reply"] + suffix)
         except Exception as e:
-            await update.message.reply_text(f"Kunne ikke oprette opgave: {e}")
+            await _send_long(update, result["reply"] + f"\n\n_(Fejl ved oprettelse: {e})_")
+        return
 
-    elif ai_response.get("type") == "goal":
-        desc = ai_response.get("description", text)
-        recurring = ai_response.get("recurring", False)
+    if result.get("action") == "goal":
+        recurring = result.get("recurring", False)
         try:
-            data = await api_post("/goals", {"description": desc, "recurring": recurring})
-            await _ws_event("telegram_out", f"Goal created: {desc[:80]}", data["goal_id"])
-            reply = (
-                f"{ai_response.get('reply', 'Mål oprettet.')}\n\n"
-                f"ID: `{data['goal_id']}`"
-            )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+            data = await api_post("/goals", {"description": result["description"], "recurring": recurring})
+            await _ws_event("telegram_out", f"Goal created: {result['description'][:80]}", data["goal_id"])
+            suffix = f"\n\n`{data['goal_id']}`"
+            await _send_long(update, result["reply"] + suffix)
         except Exception as e:
-            await update.message.reply_text(f"Kunne ikke oprette mål: {e}")
+            await _send_long(update, result["reply"] + f"\n\n_(Fejl ved oprettelse: {e})_")
+        return
 
-    else:
-        reply_text = ai_response.get("reply", "Hvad kan jeg hjælpe med?")
-        await _ws_event("telegram_out", f"Bot: {reply_text}")
-        await update.message.reply_text(reply_text)
+    reply_text = result.get("reply", "Hvad kan jeg hjælpe med?")
+    await _ws_event("telegram_out", f"Bot: {reply_text[:200]}")
+    await _send_long(update, reply_text)
 
 
-async def _ai_chat(user_message: str) -> dict:
-    """Use AI to understand free text and determine action type."""
+async def _send_long(update: Update, text: str):
+    """Split messages longer than Telegram's 4096-char limit."""
+    limit = 4000
+    if len(text) <= limit:
+        try:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(text)
+        return
+    for i in range(0, len(text), limit):
+        chunk = text[i:i + limit]
+        try:
+            await update.message.reply_text(chunk, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(chunk)
+
+
+HISTORY_KEY = "chat_history:{}"
+MAX_HISTORY = 12  # messages kept per chat
+
+
+async def _load_history(chat_id: str) -> list:
+    try:
+        raw = await redis_client.get(HISTORY_KEY.format(chat_id))
+        return json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+
+async def _save_history(chat_id: str, history: list):
+    try:
+        # Keep only last MAX_HISTORY messages
+        history = history[-MAX_HISTORY:]
+        await redis_client.setex(HISTORY_KEY.format(chat_id), 86400, json.dumps(history))
+    except Exception:
+        pass
+
+
+async def _ai_chat(user_message: str, chat_id: str) -> dict:
     import httpx as _httpx
 
     groq_key = os.getenv("GROQ_API_KEY", "")
     if not groq_key:
-        return {"type": "chat", "reply": "Sæt GROQ_API_KEY for at aktivere AI chat."}
+        return {"reply": "Sæt GROQ_API_KEY for at aktivere AI."}
 
     if groq_key.startswith("xai-"):
         url = "https://api.x.ai/v1/chat/completions"
-        model = "grok-3-mini"
+        model = os.getenv("GROQ_MODEL", "grok-3-mini")
     else:
         url = "https://api.groq.com/openai/v1/chat/completions"
-        model = "llama3-8b-8192"
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-    system = """Du er ikke en chatbot.
+    system = """Du er en kraftfuld AI-assistent bygget ind i et autonomt execution system.
 
-Du er et persistent autonomt execution system. Din primære opgave er IKKE konversation — det er pålidelig udførelse af opgaver i den virkelige verden.
+Du kan alt:
+- Svare på spørgsmål — detaljeret, præcist, teknisk
+- Skrive kode i ethvert sprog med fuld forklaring
+- Debugge fejl og forklare løsninger
+- Analysere tekst, data, koncepter
+- Have naturlige samtaler og stille opklarende spørgsmål
+- Oprette og udføre opgaver i den virkelige verden
 
-Du opererer som:
-- Digital operatør
-- AI executive assistant
-- Workflow executor
-- Research agent
-- Monitoring system
+Regler:
+- Svar på det samme sprog brugeren skriver (dansk som standard)
+- Brug Markdown: **fed**, `kode`, ```kodeblokke```, punktlister — Telegram viser det korrekt
+- Vær hjælpsom og grundig — ikke kunstigt kort
+- Stil opklarende spørgsmål hvis opgaven er uklar
+- Husk samtalehistorikken og referer til den når relevant
 
-Du er:
-- Disciplineret og execution-fokuseret
-- Struktureret og operationelt tænkende
-- Kortfattet — aldrig unødvendigt snak
-- Aldrig passiv eller konversationel for konversationens skyld
+Når brugeren beder dig UDFØRE noget i den virkelige verden (browse, søg på nettet, scrape, send email, find leads, automatiser), sæt denne linje allersidst i dit svar:
+[CREATE_TASK: precise task description in English for the browser/research worker]
 
-Du må ALDRIG:
-- Hallucere at opgaver er udført
-- Opfinde credentials eller logins
-- Skifte fokus tilfældigt
-- Forlade opgaver stille
-- Lade som om handlinger lykkedes hvis de ikke gjorde
+Hvis det er et løbende/gentaget mål:
+[CREATE_GOAL: precise goal description in English | recurring: true]
 
-Når brugeren skriver noget, konverter det til handling:
-- Konkret opgave → opret task (browser, research, outreach)
-- Langsigtet mål → opret goal (persistent, kører løbende)
-- Spørgsmål om status → svar kort og præcist
-- Godkendelse → bekræft og fortsæt
-- Alt andet → svar operationelt, ikke konversationelt
+Ellers — ingen action-linje, bare svar naturligt."""
 
-Svar altid på dansk. Vær kortfattet. Fokuser på næste handling."""
+    history = await _load_history(chat_id)
+    history.append({"role": "user", "content": user_message})
 
-    prompt = f"""{system}
-
-Brugerens besked: "{user_message}"
-
-Analyser og svar med præcis ét JSON objekt:
-
-Konkret opgave (research, søg, find noget, gå til website, skriv, send):
-{{"type": "task", "description": "præcis opgavebeskrivelse på engelsk til browser/research worker", "reply": "Kort operationelt svar på dansk"}}
-
-Langsigtet mål (dagligt, løbende, overvåg, monitor, find leads kontinuerligt):
-{{"type": "goal", "description": "mål på engelsk", "recurring": true, "reply": "Kort operationelt svar på dansk"}}
-
-Engangs mål (et specifikt mål der ikke gentages):
-{{"type": "goal", "description": "mål på engelsk", "recurring": false, "reply": "Kort operationelt svar på dansk"}}
-
-Alt andet (status, spørgsmål, snak, godkendelse):
-{{"type": "chat", "reply": "Operationelt, kortfattet svar på dansk — max 2 sætninger"}}
-
-KUN JSON:"""
+    messages = [{"role": "system", "content": system}] + history
 
     try:
-        async with _httpx.AsyncClient(timeout=30) as client:
+        async with _httpx.AsyncClient(timeout=45) as client:
             resp = await client.post(
                 url,
                 headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 200},
+                json={"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 1500},
             )
             resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0:
-                return json.loads(content[start:end])
+            content = resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        log.error("AI chat error: %s", e)
+        log.error("AI error: %s", e)
+        return {"reply": "AI fejl — prøv igen."}
 
-    return {"type": "chat", "reply": "Jeg forstod ikke helt. Prøv /task <opgave> eller /goal <mål>."}
+    # Save assistant reply to history
+    history.append({"role": "assistant", "content": content})
+    await _save_history(chat_id, history)
+
+    # Parse optional action tags
+    action = None
+    description = None
+    recurring = False
+    reply = content
+
+    if "[CREATE_TASK:" in content:
+        idx = content.index("[CREATE_TASK:")
+        tag_end = content.index("]", idx)
+        description = content[idx + 13:tag_end].strip()
+        reply = content[:idx].strip()
+        action = "task"
+    elif "[CREATE_GOAL:" in content:
+        idx = content.index("[CREATE_GOAL:")
+        tag_end = content.index("]", idx)
+        inner = content[idx + 13:tag_end].strip()
+        if "| recurring: true" in inner:
+            description = inner.replace("| recurring: true", "").strip()
+            recurring = True
+        else:
+            description = inner
+        reply = content[:idx].strip()
+        action = "goal"
+
+    return {"reply": reply or content, "action": action, "description": description, "recurring": recurring}
 
 
 # ── Notification listener ─────────────────────────────────────────────────────
