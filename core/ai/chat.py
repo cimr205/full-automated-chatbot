@@ -21,7 +21,7 @@ def _get_endpoint() -> tuple[str, str, str]:
     if not key:
         return "", "", ""
     if key.startswith("xai-"):
-        return key, "https://api.x.ai/v1/chat/completions", os.getenv("GROQ_MODEL", "grok-3")
+        return key, "https://api.x.ai/v1/chat/completions", os.getenv("GROQ_MODEL", "grok-3-mini")
     return key, "https://api.groq.com/openai/v1/chat/completions", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
