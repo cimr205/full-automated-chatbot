@@ -523,8 +523,43 @@ async def _send_long(update: Update, text: str):
             await update.message.reply_text(chunk)
 
 
+async def _tool_search(query: str) -> str:
+    """DuckDuckGo web search — no API key needed."""
+    try:
+        from duckduckgo_search import AsyncDDGS
+        async with AsyncDDGS() as ddgs:
+            results = await ddgs.atext(query, max_results=6)
+        if not results:
+            return "Ingen resultater fundet."
+        parts = []
+        for r in results:
+            parts.append(f"**{r['title']}**\n{r['body'][:400]}\nKilde: {r['href']}")
+        return "\n\n---\n\n".join(parts)
+    except Exception as e:
+        log.warning("Search failed: %s", e)
+        return f"Søgning fejlede: {e}"
+
+
+async def _tool_fetch(url: str) -> str:
+    """Fetch and strip a webpage to plain text."""
+    try:
+        import re
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True,
+                                     headers={"User-Agent": "Mozilla/5.0"}) as client:
+            resp = await client.get(url)
+            html = resp.text
+        # Strip tags
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:4000] + ("…" if len(text) > 4000 else "")
+    except Exception as e:
+        return f"Kunne ikke hente siden: {e}"
+
+
 HISTORY_KEY = "chat_history:{}"
-MAX_HISTORY = 12  # messages kept per chat
+MAX_HISTORY = 16
 
 
 async def _load_history(chat_id: str) -> list:
@@ -537,115 +572,162 @@ async def _load_history(chat_id: str) -> list:
 
 async def _save_history(chat_id: str, history: list):
     try:
-        # Keep only last MAX_HISTORY messages
-        history = history[-MAX_HISTORY:]
-        await redis_client.setex(HISTORY_KEY.format(chat_id), 86400, json.dumps(history))
+        await redis_client.setex(HISTORY_KEY.format(chat_id), 86400 * 7,
+                                 json.dumps(history[-MAX_HISTORY:]))
     except Exception:
         pass
 
 
+async def _call_ai(url: str, model: str, key: str, messages: list, max_tokens: int = 2000) -> str:
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "temperature": 0.7, "max_tokens": max_tokens},
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+
+
 async def _ai_chat(user_message: str, chat_id: str) -> dict:
-    import httpx as _httpx
+    import re
 
     groq_key = os.getenv("GROQ_API_KEY", "")
     if not groq_key:
-        return {"reply": "Sæt GROQ_API_KEY for at aktivere AI."}
+        return {"reply": "Sæt GROQ_API_KEY i Railway for at aktivere AI."}
 
     if groq_key.startswith("xai-"):
-        url = "https://api.x.ai/v1/chat/completions"
-        model = os.getenv("GROQ_MODEL", "grok-3-mini")
+        ai_url = "https://api.x.ai/v1/chat/completions"
+        model = os.getenv("GROQ_MODEL", "grok-3")        # Full Grok 3
     else:
-        url = "https://api.groq.com/openai/v1/chat/completions"
+        ai_url = "https://api.groq.com/openai/v1/chat/completions"
         model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-    # Load brain context
     brain_ctx = await brain.context_for_ai() if brain else ""
 
-    system = f"""Du er en kraftfuld personlig AI-assistent og digital tvilling — bygget eksklusivt til én person.
+    system = f"""Du er en ekstremt kraftfuld personlig AI-assistent — bygget udelukkende til én person.
 
-Du kan alt:
-- Svare på alle spørgsmål detaljeret, præcist, teknisk
-- Skrive og debugge kode i ethvert sprog
-- Analysere, forklare, sammenligne koncepter
-- Have naturlige samtaler og stille opklarende spørgsmål
-- Oprette og udføre opgaver i den virkelige verden via browser automation
-- Huske og lære fra samtaler
+Du har fuld adgang til internettets information via søgeværktøjer og kan læse enhver hjemmeside.
 
-Regler:
-- Svar på det samme sprog brugeren skriver (dansk som standard)
-- Brug Markdown: **fed**, `kode`, ```kodeblokke```, punktlister
-- Vær grundig og hjælpsom — ikke kunstigt kort
-- Stil opklarende spørgsmål hvis opgaven er uklar
-- Brug de kendte fakta nedenfor aktivt i dine svar
+HVEM DU ER:
+- Personlig AI-assistent og digital tvilling
+- Du kender brugeren dybt og husker alt
+- Du er like ChatGPT + Claude + internet adgang i én
 
-Hvis du lærer noget vigtigt om brugeren (navn, præferencer, virksomhed, mål, koder osv.) som bør huskes permanent, tilføj sidst i dit svar:
+HVAD DU KAN:
+✓ Svare på ALT — faktuel viden, tekniske spørgsmål, analyse, rådgivning
+✓ Skrive kode i ethvert sprog med forklaring og eksempler
+✓ Søge på nettet for aktuelle informationer, priser, nyheder
+✓ Læse og opsummere hjemmesider og artikler
+✓ Debugge fejl, gennemgå kode, forklare koncepter
+✓ Skrive, redigere, oversætte tekster
+✓ Planlægge, analysere, strategisere
+✓ Udføre opgaver i den virkelige verden via browser automation
+
+STIL:
+- Svar på brugerens sprog (dansk medmindre andet)
+- Vær grundig, præcis og hjælpsom — som den bedste kollega
+- Brug Markdown flittigt: **fed**, `kode`, ```blokke```, ## overskrifter, - lister
+- Svar DIREKTE på spørgsmålet — giv svaret først, forklaring efter
+- Stil 1-2 opklarende spørgsmål hvis opgaven er uklar
+- Aldrig afvis en opgave — find en måde
+
+TILGÆNGELIGE VÆRKTØJER:
+Når du mangler aktuel information eller skal finde noget, brug:
+[SEARCH: din søgeforespørgsel]
+
+Når du skal læse en specifik hjemmeside:
+[FETCH: https://url.com]
+
+Du kan bruge flere værktøjer i en response. Vent på resultater inden du svarer endeligt.
+
+HUKOMMELSE:
+Når du lærer noget vigtigt om brugeren, gem det automatisk:
 [REMEMBER: nøgle=værdi]
-Du kan tilføje flere [REMEMBER: ...] linjer.
 
-Når brugeren beder dig UDFØRE noget eksternt (browse, søg, scrape, send, automatiser), tilføj allersidst:
+HANDLINGER:
+Når brugeren vil have noget udført i virkeligheden (automatisering, research, scraping, outreach):
 [CREATE_TASK: precise English description for browser worker]
 
-Løbende/gentaget mål:
+Løbende/gentaget opgave:
 [CREATE_GOAL: precise English description | recurring: true]
 
 {brain_ctx}"""
 
     history = await _load_history(chat_id)
     history.append({"role": "user", "content": user_message})
-
     messages = [{"role": "system", "content": system}] + history
 
-    try:
-        async with _httpx.AsyncClient(timeout=45) as client:
-            resp = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": messages, "temperature": 0.7, "max_tokens": 1500},
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        log.error("AI error: %s", e)
-        return {"reply": "AI fejl — prøv igen."}
+    # ── Tool execution loop (max 4 rounds) ────────────────────────────────────
+    content = ""
+    for round_num in range(4):
+        try:
+            content = await _call_ai(ai_url, model, groq_key, messages)
+        except Exception as e:
+            log.error("AI call error (round %d): %s", round_num, e)
+            return {"reply": f"AI fejl: {e}"}
 
-    # Save assistant reply to history
+        # Check for tool calls
+        used_tool = False
+
+        if "[SEARCH:" in content:
+            for match in re.finditer(r'\[SEARCH:\s*([^\]]+)\]', content):
+                query = match.group(1).strip()
+                log.info("Tool: search(%s)", query)
+                results = await _tool_search(query)
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content":
+                    f"[Søgeresultater for '{query}']:\n\n{results}\n\n"
+                    f"Brug disse resultater til at besvare spørgsmålet præcist og fuldt ud."})
+                used_tool = True
+                break
+
+        elif "[FETCH:" in content:
+            for match in re.finditer(r'\[FETCH:\s*(https?://[^\]]+)\]', content):
+                fetch_url = match.group(1).strip()
+                log.info("Tool: fetch(%s)", fetch_url)
+                page = await _tool_fetch(fetch_url)
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content":
+                    f"[Indhold fra {fetch_url}]:\n\n{page}\n\n"
+                    f"Brug dette indhold i dit svar."})
+                used_tool = True
+                break
+
+        if not used_tool:
+            break  # Final answer — no more tools needed
+
+    # ── Save history ──────────────────────────────────────────────────────────
     history.append({"role": "assistant", "content": content})
     await _save_history(chat_id, history)
 
-    # Auto-save [REMEMBER: key=value] tags to brain
+    # ── Auto-save brain facts ─────────────────────────────────────────────────
     if brain and "[REMEMBER:" in content:
-        import re
         for match in re.finditer(r'\[REMEMBER:\s*([^\]=]+)=([^\]]+)\]', content):
             k, v = match.group(1).strip(), match.group(2).strip()
             await brain.remember(k, v)
-            log.info("Brain saved: %s = %s", k, v)
         content = re.sub(r'\[REMEMBER:[^\]]+\]', '', content).strip()
 
-    # Parse optional action tags
-    action = None
-    description = None
-    recurring = False
-    reply = content
+    # ── Parse action tags ─────────────────────────────────────────────────────
+    action, description, recurring, reply = None, None, False, content
 
     if "[CREATE_TASK:" in content:
         idx = content.index("[CREATE_TASK:")
-        tag_end = content.index("]", idx)
-        description = content[idx + 13:tag_end].strip()
+        end = content.index("]", idx)
+        description = content[idx + 13:end].strip()
         reply = content[:idx].strip()
         action = "task"
     elif "[CREATE_GOAL:" in content:
         idx = content.index("[CREATE_GOAL:")
-        tag_end = content.index("]", idx)
-        inner = content[idx + 13:tag_end].strip()
-        if "| recurring: true" in inner:
-            description = inner.replace("| recurring: true", "").strip()
-            recurring = True
-        else:
-            description = inner
+        end = content.index("]", idx)
+        inner = content[idx + 13:end].strip()
+        recurring = "| recurring: true" in inner
+        description = inner.replace("| recurring: true", "").strip()
         reply = content[:idx].strip()
         action = "goal"
 
     return {"reply": reply or content, "action": action, "description": description, "recurring": recurring}
+
 
 
 # ── Notification listener ─────────────────────────────────────────────────────
