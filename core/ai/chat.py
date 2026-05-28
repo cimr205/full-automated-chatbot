@@ -94,8 +94,6 @@ def _tool_calc(expr: str) -> str:
 # ── System prompt ─────────────────────────────────────────────────────────────
 
 def build_system_prompt(brain_ctx: str = "") -> str:
-    import os
-    email_status = "✅ konfigureret" if os.getenv("EMAIL_USER") else "❌ ikke sat op (sæt EMAIL_USER + EMAIL_PASSWORD)"
     return f"""Du er en ekstremt kraftfuld personlig AI-assistent og digital tvilling — bygget udelukkende til én person.
 
 Du kan alt hvad en person kan digitalt + mere:
@@ -122,7 +120,7 @@ Læs hjemmeside/artikel:
 Beregning:
 [CALC: 2500 * 1.25]
 
-Email — status: {email_status}
+Email:
 [EMAIL_READ: n=5]
 [EMAIL_SEND: to=mail@example.com | subject=Emne | body=Indhold]
 
@@ -131,8 +129,11 @@ Filer (sandbox: /tmp/agent-files):
 [FILE_WRITE: filnavn.txt | indhold her]
 [FILE_LIST: .]
 
-Husk noget permanent:
+Husk noget permanent om brugeren:
 [REMEMBER: nøgle=værdi]
+
+Gem credentials sikkert i vault:
+[VAULT_SAVE: nøgle=værdi]
 
 Browser-automatisering (navigering, login, scraping):
 [CREATE_TASK: precise English description]
@@ -140,11 +141,24 @@ Browser-automatisering (navigering, login, scraping):
 Løbende/gentaget automatisering:
 [CREATE_GOAL: precise English description | recurring: true]
 
+HÅNDTERING AF MANGLENDE OPSÆTNING:
+Når et værktøj returnerer SETUP_NEEDED, skal du IKKE give op eller bede brugeren om at sætte env vars.
+I stedet: spørg brugeren om de manglende oplysninger direkte i chatten, ét spørgsmål ad gangen.
+Gem svaret med [VAULT_SAVE: nøgle=værdi] og prøv handlingen igen automatisk.
+
+Eksempel — email ikke sat op:
+1. Du: "Din email er ikke konfigureret endnu. Hvad er din email-adresse?"
+2. Bruger: "test@gmail.com"
+3. Du: [VAULT_SAVE: email_user=test@gmail.com] "Hvad er dit app-kodeord? (Gmail: myaccount.google.com/apppasswords)"
+4. Bruger: "abc123def"
+5. Du: [VAULT_SAVE: email_password=abc123def][VAULT_SAVE: email_host=imap.gmail.com] prøver [EMAIL_READ: n=5] igen.
+
+Samme princip gælder for alle manglende credentials — guides brugeren igennem.
+
 REGLER:
 - Svar på brugerens sprog (dansk som standard)
 - Brug Markdown: **fed**, `kode`, ```blokke```, ## overskrifter, lister
 - Svar DIREKTE — giv svaret/handlingen først, forklaring efter
-- Stil 1-2 opklarende spørgsmål kun hvis opgaven er uklar
 - Aldrig afvis — find altid en vej
 - Brug værktøjer automatisk uden at spørge om tilladelse
 - Du kan bruge FLERE værktøjer i én response
@@ -189,7 +203,7 @@ async def chat(
     messages = [{"role": "system", "content": system}] + history
 
     content = ""
-    for round_num in range(5):
+    for round_num in range(8):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
@@ -273,6 +287,23 @@ async def chat(
             messages += [{"role": "assistant", "content": content},
                          {"role": "user", "content": f"[FILE_LIST {path}]:\n\n{result}"}]
             used_tool = True
+
+        # ── Vault save (inline credential storage + retry trigger) ──
+        if vault and "[VAULT_SAVE:" in content:
+            saved = []
+            for match in re.finditer(r'\[VAULT_SAVE:\s*([^\]=]+)=([^\]]+)\]', content):
+                k, v = match.group(1).strip(), match.group(2).strip()
+                await vault.save(k, v)
+                saved.append(k)
+                # Update live email_creds so a retry in the same turn works
+                if k in ("email_user", "email_password", "email_host", "smtp_host", "smtp_port"):
+                    email_creds[k] = v
+            clean_content = re.sub(r'\[VAULT_SAVE:[^\]]+\]', '', content).strip()
+            if saved:
+                messages += [{"role": "assistant", "content": clean_content},
+                             {"role": "user", "content": f"[VAULT_SAVE]: Gemt sikkert: {', '.join(saved)}. Prøv nu handlingen igen."}]
+                content = clean_content
+                used_tool = True
 
         if not used_tool:
             break

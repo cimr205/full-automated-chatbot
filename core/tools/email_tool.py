@@ -83,12 +83,8 @@ def _send_email_sync(to: str, subject: str, body: str, overrides: dict = None) -
 
 
 NOT_CONFIGURED_MSG = (
-    "EMAIL_IKKE_KONFIGURERET: Din email er ikke sat op endnu. "
-    "Gem dine credentials i vault'en:\n"
-    "`/vault save email_user din@email.com`\n"
-    "`/vault save email_password dit-kodeord`\n"
-    "Brug Gmail? Sæt også: `/vault save email_host imap.gmail.com`\n"
-    "Brug Outlook? Sæt: `/vault save email_host outlook.office365.com`"
+    "SETUP_NEEDED: Email credentials mangler (email_user, email_password, email_host). "
+    "Spørg brugeren om deres email og gem med [VAULT_SAVE: nøgle=værdi]."
 )
 
 
