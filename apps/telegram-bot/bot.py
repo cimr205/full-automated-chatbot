@@ -66,10 +66,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Autonomous Execution System*\n\n"
         "*Bare skriv* — AI forstår alt naturligt\n\n"
-        "*Tasks & Goals*\n"
-        "/task <beskrivelse> — kør opgave\n"
+        "*Tasks & Agents*\n"
+        "/task <beskrivelse> — start agent\n"
         "/tasks — vis alle tasks\n"
         "/status <id> — task status + logs\n"
+        "/stop — stop aktiv agent (eller /stop <id>)\n"
+        "/reply <id> <svar> — svar til ventende agent\n\n"
+        "*Goals (løbende)*\n"
         "/goal <beskrivelse> — opret mål\n"
         "/goals — aktive mål\n"
         "/pause /resume /cancel <id>\n\n"
@@ -235,6 +238,24 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"`{ctx.args[0]}` resumed.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
+
+
+async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    # Stop a specific task or the currently active one
+    if ctx.args:
+        task_id = ctx.args[0]
+    else:
+        task_id = await redis_client.get("task:active")
+        if not task_id:
+            await update.message.reply_text("Ingen aktiv agent at stoppe. Brug `/stop <task_id>`", parse_mode="Markdown")
+            return
+    await redis_client.set(f"task:stop:{task_id}", "1", ex=3600)
+    await update.message.reply_text(
+        f"⛔ Stop signal sendt til `{task_id}`\nAgenten afslutter nuværende trin og stopper.",
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -734,7 +755,7 @@ Løbende/gentaget opgave:
 
 async def listen_notifications(bot):
     pubsub = redis_client.pubsub()
-    await pubsub.subscribe("supervisor:notifications", "browser:screenshots")
+    await pubsub.subscribe("supervisor:notifications", "browser:screenshots", "browser:progress")
     log.info("Notification listener started")
     async for message in pubsub.listen():
         if message["type"] != "message":
@@ -771,26 +792,52 @@ async def listen_notifications(bot):
                 await redis_client.setex("bot:pending_task", 600, task_id)
 
                 caption = (
-                    f"⏸ *Task venter på dig*\n`{task_id}`\n\n"
+                    f"⏸ *Agent venter på dig*\n`{task_id}`\n\n"
                     f"{reason}\n\n"
-                    f"_Skriv bare svaret/koden herunder — ingen kommando nødvendig_"
+                    f"_Skriv bare svaret/koden — ingen kommando nødvendig_"
                 )
-                if screenshot_path and Path(screenshot_path).exists():
-                    with open(screenshot_path, "rb") as f:
-                        await bot.send_photo(
-                            chat_id=ALLOWED_CHAT_ID,
-                            photo=InputFile(f),
-                            caption=caption,
-                            parse_mode="Markdown",
-                        )
-                else:
-                    await bot.send_message(
-                        chat_id=ALLOWED_CHAT_ID,
-                        text=caption,
-                        parse_mode="Markdown",
-                    )
+                await _send_photo_or_text(bot, caption, screenshot_path)
+
+            elif channel == "browser:progress":
+                task_id = data["task_id"]
+                url = data.get("url", "")
+                status = data.get("status", "")
+                step = data.get("step", 0)
+                screenshot_path = data.get("screenshot_path", "")
+
+                short_url = url[:60] + "…" if len(url) > 60 else url
+                caption = (
+                    f"📸 *Agent Update* `{task_id}`\n"
+                    f"🌐 `{short_url}`\n"
+                    f"📊 Trin: {step}\n\n"
+                    f"{status[:500]}\n\n"
+                    f"_`/stop` for at stoppe agenten_"
+                )
+                await _send_photo_or_text(bot, caption, screenshot_path)
+                await _ws_event("telegram_out", f"Progress: {status[:100]}", task_id)
+
         except Exception as e:
             log.error("Notification error: %s", e)
+
+
+async def _send_photo_or_text(bot, caption: str, screenshot_path: str):
+    if screenshot_path and Path(screenshot_path).exists():
+        try:
+            with open(screenshot_path, "rb") as f:
+                await bot.send_photo(
+                    chat_id=ALLOWED_CHAT_ID,
+                    photo=InputFile(f),
+                    caption=caption,
+                    parse_mode="Markdown",
+                )
+            return
+        except Exception as e:
+            log.warning("Photo send failed, falling back to text: %s", e)
+    await bot.send_message(
+        chat_id=ALLOWED_CHAT_ID,
+        text=caption,
+        parse_mode="Markdown",
+    )
 
 
 async def _auto_credential(reason: str, task_id: str) -> bool:
@@ -864,6 +911,7 @@ async def main():
         ("start", cmd_start), ("help", cmd_start),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply),
+        ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),
         ("goals", cmd_goals), ("pause", cmd_pause), ("resume", cmd_resume),
         ("cancel", cmd_cancel), ("health", cmd_health),

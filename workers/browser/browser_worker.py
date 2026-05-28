@@ -1,12 +1,3 @@
-"""
-Browser Worker — executes tasks via persistent Playwright session.
-
-Phase 2 additions:
-- Anti-detection timing (realistic delays)
-- Memory-aware context (experience retrieval)
-- Plan-aware step execution
-- Approval gating before irreversible actions
-"""
 import asyncio
 import json
 import logging
@@ -28,7 +19,8 @@ log = logging.getLogger(__name__)
 SCREENSHOT_DIR = Path("/tmp/screenshots")
 BROWSER_DATA_DIR = Path(os.getenv("BROWSER_DATA_DIR", "/tmp/browser-data"))
 HUMAN_REPLY_TIMEOUT = int(os.getenv("HUMAN_REPLY_TIMEOUT", "300"))
-MAX_TASK_STEPS = int(os.getenv("MAX_TASK_STEPS", "25"))
+PROGRESS_INTERVAL = int(os.getenv("PROGRESS_INTERVAL", "120"))  # seconds
+MAX_STEPS = 200  # hard safety cap
 
 APPROVAL_ACTIONS = {"send", "post", "publish", "submit_outreach", "deploy"}
 
@@ -43,11 +35,13 @@ class BrowserWorker:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._consecutive_waits = 0
+        self._done = False
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         BROWSER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     async def execute(self):
         task_id = self.task["task_id"]
+        self._done = False
         log.info("[%s] Browser execution starting", task_id)
         checkpoint = self.task.get("_checkpoint")
 
@@ -55,7 +49,12 @@ class BrowserWorker:
             self._context = await pw.chromium.launch_persistent_context(
                 str(BROWSER_DATA_DIR),
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu",
+                ],
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -65,15 +64,71 @@ class BrowserWorker:
             await self._context.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
-
             self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
 
             if checkpoint and checkpoint.get("url"):
-                log.info("[%s] Restoring from checkpoint: %s", task_id, checkpoint["url"])
+                log.info("[%s] Restoring checkpoint: %s", task_id, checkpoint["url"])
                 await self._safe_goto(checkpoint["url"])
 
-            await self._run_ai_loop()
+            # Start background progress reporter (every PROGRESS_INTERVAL seconds)
+            reporter = asyncio.create_task(self._progress_reporter())
+
+            # Send "started" screenshot immediately
+            await asyncio.sleep(1)
+            shot = await self._screenshot(f"{task_id}_start")
+            await self._publish_progress(shot, f"🚀 Agent startet\n{self.task['description'][:120]}", step=0)
+
+            try:
+                await self._run_ai_loop()
+            finally:
+                self._done = True
+                reporter.cancel()
+                try:
+                    await reporter
+                except asyncio.CancelledError:
+                    pass
+
             await self._context.close()
+
+    # ── Progress reporting ────────────────────────────────────────────────────
+
+    async def _progress_reporter(self):
+        task_id = self.task["task_id"]
+        while not self._done:
+            await asyncio.sleep(PROGRESS_INTERVAL)
+            if self._done:
+                break
+            try:
+                shot = await self._screenshot(
+                    f"{task_id}_prog_{int(datetime.utcnow().timestamp())}"
+                )
+                recent = self.task.get("logs", [])[-6:]
+                status = "\n".join(f"• {l}" for l in recent) or "Arbejder…"
+                step_n = len([l for l in self.task.get("logs", [])
+                               if any(k in l for k in ("→", "Click", "Type", "Extract"))])
+                await self._publish_progress(shot, status, step=step_n)
+            except Exception as e:
+                log.warning("[%s] Progress reporter error: %s", task_id, e)
+
+    async def _publish_progress(self, screenshot_path: str, status: str, step: int = 0):
+        await self.redis.publish("browser:progress", json.dumps({
+            "task_id": self.task["task_id"],
+            "screenshot_path": screenshot_path,
+            "url": self._page.url if self._page else "",
+            "status": status,
+            "step": step,
+            "ts": datetime.utcnow().isoformat(),
+        }))
+
+    # ── Stop signal ──────────────────────────────────────────────────────────
+
+    async def _should_stop(self) -> bool:
+        try:
+            return await self.redis.exists(f"task:stop:{self.task['task_id']}") > 0
+        except Exception:
+            return False
+
+    # ── Main AI loop ──────────────────────────────────────────────────────────
 
     async def _run_ai_loop(self):
         task_id = self.task["task_id"]
@@ -81,12 +136,24 @@ class BrowserWorker:
 
         past_experience = []
         if self.memory:
-            past_experience = await self.memory.query_experience(description[:100])
+            try:
+                past_experience = await self.memory.query_experience(description[:100])
+            except Exception:
+                pass
 
-        for step in range(MAX_TASK_STEPS):
-            log.info("[%s] Step %d/%d | URL: %s", task_id, step + 1, MAX_TASK_STEPS, self._page.url)
+        for step in range(1, MAX_STEPS + 1):
 
-            screenshot_path = await self._screenshot(f"{task_id}_step{step:02d}")
+            # Check stop signal every step
+            if await self._should_stop():
+                self._log("⛔ Stop signal — agent afslutter")
+                await self.redis.delete(f"task:stop:{task_id}")
+                shot = await self._screenshot(f"{task_id}_stopped")
+                await self._publish_progress(shot, "⛔ Stoppet af bruger", step=step)
+                return
+
+            log.info("[%s] Step %d | %s", task_id, step, self._page.url)
+
+            screenshot_path = await self._screenshot(f"{task_id}_s{step:04d}")
             page_text = await self._get_page_text()
             current_url = self._page.url
 
@@ -97,18 +164,23 @@ class BrowserWorker:
             action = self._parse_action(ai_response)
 
             log.info("[%s] Action: %s", task_id, json.dumps(action)[:120])
-
             await self._execute_action(action, screenshot_path, step)
 
             if action.get("type") == "complete":
-                self._log("Task marked complete by AI")
+                self._log("✅ Task færdig")
+                shot = await self._screenshot(f"{task_id}_done")
+                await self._publish_progress(shot, "✅ Task markeret færdig af agent", step=step)
                 return
 
-            self._consecutive_waits = (self._consecutive_waits + 1) if action.get("type") == "wait" else 0
+            self._consecutive_waits = (
+                self._consecutive_waits + 1 if action.get("type") == "wait" else 0
+            )
             if self._consecutive_waits >= 5:
-                raise HumanRequiredError("AI stuck in wait loop — manual intervention needed")
+                raise HumanRequiredError("Agent fast i wait-loop — brug /reply for at guide den")
 
-        log.warning("[%s] Reached max steps", task_id)
+        self._log(f"⚠️ Nåede maks. {MAX_STEPS} trin")
+
+    # ── Action execution ──────────────────────────────────────────────────────
 
     async def _execute_action(self, action: dict, screenshot_path: str, step: int):
         t = action.get("type", "wait")
@@ -117,33 +189,30 @@ class BrowserWorker:
             return
 
         if t == "need_human":
-            reason = action.get("reason", "Human input required")
+            reason = action.get("reason", "Input påkrævet")
             await self._send_screenshot_notification(screenshot_path, reason)
             reply = await self._wait_for_human_reply()
             await self._handle_human_reply(reply)
             return
 
         if t == "approve_required":
-            action_desc = action.get("description", "Action requires approval")
-            await self._request_approval(screenshot_path, action_desc)
+            desc = action.get("description", "Handling kræver godkendelse")
+            await self._request_approval(screenshot_path, desc)
             reply = await self._wait_for_human_reply()
-            if reply.lower().strip() not in ("yes", "ok", "approve", "y", "confirmed"):
-                self._log(f"Approval denied: {action_desc}")
+            if reply.lower().strip() not in ("yes", "ok", "approve", "y", "ja", "confirmed"):
+                self._log(f"Godkendelse afvist: {desc}")
                 return
-            self._log(f"Approved: {action_desc}")
+            self._log(f"Godkendt: {desc}")
             return
 
         if t == "navigate":
-            url = action.get("url", "")
-            if url:
+            if url := action.get("url", ""):
                 await self._safe_goto(url)
 
         elif t == "click":
-            selector = action.get("selector", "")
-            text = action.get("text", "")
-            if selector:
+            if selector := action.get("selector", ""):
                 await self._safe_click(selector)
-            elif text:
+            elif text := action.get("text", ""):
                 await self._click_by_text(text)
 
         elif t == "type":
@@ -167,45 +236,48 @@ class BrowserWorker:
 
         await self._human_delay()
 
-    def _build_prompt(self, description: str, step: int, url: str, page_text: str, experience: list) -> str:
-        recent_logs = "\n".join(self.task.get("logs", [])[-6:])
+    # ── Prompt ────────────────────────────────────────────────────────────────
+
+    def _build_prompt(self, description: str, step: int, url: str,
+                      page_text: str, experience: list) -> str:
+        recent_logs = "\n".join(self.task.get("logs", [])[-8:])
         exp_text = ""
         if experience:
             exp_text = "PAST EXPERIENCE:\n" + "\n".join(
-                f"- {e.get('text','')[:120]}" for e in experience[:2]
+                f"- {e.get('text','')[:120]}" for e in experience[:3]
             )
 
-        return f"""You are a browser automation AI. Execute the task reliably and safely.
+        return f"""You are an autonomous browser agent. Execute the task step by step.
 
 TASK: {description[:600]}
-STEP: {step + 1}/{MAX_TASK_STEPS}
+STEP: {step}
 URL: {url}
-PAGE (truncated): {page_text[:1800]}
+PAGE (truncated): {page_text[:2000]}
 
 RECENT ACTIONS:
 {recent_logs}
 {exp_text}
 
-Respond with ONLY one JSON action:
+Reply with ONLY one JSON action:
 
 {{"type": "navigate", "url": "https://..."}}
 {{"type": "click", "selector": "CSS_SELECTOR"}}
 {{"type": "click", "text": "VISIBLE_BUTTON_TEXT"}}
-{{"type": "type", "selector": "CSS_SELECTOR", "value": "TEXT"}}
+{{"type": "type", "selector": "CSS_SELECTOR", "value": "TEXT_TO_TYPE"}}
 {{"type": "scroll", "direction": "down", "amount": 500}}
-{{"type": "extract", "fields": ["name", "email", "company"]}}
+{{"type": "extract", "fields": ["field1", "field2"]}}
 {{"type": "wait", "seconds": 2}}
-{{"type": "need_human", "reason": "EXPLAIN_WHAT_IS_NEEDED"}}
-{{"type": "approve_required", "description": "WHAT_YOU_ARE_ABOUT_TO_DO"}}
+{{"type": "need_human", "reason": "EXPLAIN_EXACTLY_WHAT_IS_NEEDED"}}
+{{"type": "approve_required", "description": "DESCRIBE_IRREVERSIBLE_ACTION"}}
 {{"type": "complete"}}
 
 Rules:
-- Use need_human for logins, captchas, 2FA, or anything blocking
-- Use approve_required before sending messages, posting, or any irreversible action
-- Use complete only when the task outcome is fully verified
-- Never fabricate success
-- Prefer conservative actions
-- Avoid repeating the same action twice in a row
+- need_human: logins, captchas, 2FA codes, blocked pages
+- approve_required: before sending emails, posting, paying
+- complete: only when the task outcome is fully achieved
+- Never guess or fabricate results
+- Never repeat the same failed action
+- Be systematic — one action per step
 
 JSON:"""
 
@@ -216,11 +288,12 @@ JSON:"""
             if start >= 0 and end > start:
                 return json.loads(response[start:end])
         except Exception as e:
-            log.warning("Action parse failed: %s | raw: %.100s", e, response)
+            log.warning("Parse failed: %s | %.80s", e, response)
         return {"type": "wait", "seconds": 3}
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
     async def _human_delay(self):
-        """Realistic timing to avoid bot detection."""
         await asyncio.sleep(random.uniform(0.8, 2.5))
 
     async def _screenshot(self, name: str) -> str:
@@ -254,7 +327,7 @@ JSON:"""
     async def _click_by_text(self, text: str):
         try:
             await self._page.get_by_text(text, exact=False).first.click(timeout=5000)
-            self._log(f"Click text: {text}")
+            self._log(f"Click: {text}")
         except Exception as e:
             log.warning("Click text '%s' failed: %s", text, e)
 
@@ -262,7 +335,7 @@ JSON:"""
         try:
             await self._page.fill(selector, value, timeout=5000)
             await asyncio.sleep(random.uniform(0.3, 0.8))
-            self._log(f"Type into [{selector}]")
+            self._log(f"Type → [{selector}]")
         except Exception as e:
             log.warning("Type %s failed: %s", selector, e)
 
@@ -280,13 +353,11 @@ JSON:"""
         return data
 
     async def _save_checkpoint(self, url: str, step: int, page_text: str):
-        cp = {
-            "url": url,
-            "step": step,
+        await self.queue.save_checkpoint(self.task["task_id"], {
+            "url": url, "step": step,
             "ts": datetime.utcnow().isoformat(),
             "page_snippet": page_text[:500],
-        }
-        await self.queue.save_checkpoint(self.task["task_id"], cp)
+        })
 
     async def _send_screenshot_notification(self, screenshot_path: str, reason: str):
         await self.redis.publish("browser:screenshots", json.dumps({
@@ -300,7 +371,7 @@ JSON:"""
         await self.redis.publish("browser:screenshots", json.dumps({
             "task_id": self.task["task_id"],
             "screenshot_path": screenshot_path,
-            "reason": f"APPROVAL REQUIRED: {description}\n\nReply yes/no",
+            "reason": f"GODKENDELSE PÅKRÆVET:\n{description}\n\nSvar: ja / nej",
             "ts": datetime.utcnow().isoformat(),
         }))
 
@@ -312,13 +383,13 @@ JSON:"""
             deadline = asyncio.get_event_loop().time() + HUMAN_REPLY_TIMEOUT
             async for message in pubsub.listen():
                 if asyncio.get_event_loop().time() > deadline:
-                    raise HumanRequiredError("Timed out waiting for human reply")
+                    raise HumanRequiredError("Timeout — ingen svar fra bruger")
                 if message["type"] == "message":
                     data = json.loads(message["data"])
                     return data.get("message", "")
         finally:
             await pubsub.unsubscribe(f"human_reply:{task_id}")
-            await pubsub.close()
+            await pubsub.aclose()
         return ""
 
     async def _handle_human_reply(self, reply: str):
@@ -329,15 +400,21 @@ JSON:"""
         elif lower.startswith("type ") and " into " in lower:
             parts = reply[5:].split(" into ", 1)
             await self._safe_type(parts[1].strip(), parts[0].strip())
-        elif lower.startswith("goto ") or lower.startswith("navigate "):
+        elif lower.startswith(("goto ", "navigate ")):
             await self._safe_goto(reply.split(" ", 1)[1].strip())
         elif lower.startswith("http"):
             await self._safe_goto(reply.strip())
+        else:
+            # Generic: type the reply into any focused input
+            try:
+                await self._page.keyboard.type(reply)
+            except Exception:
+                pass
 
     def _log(self, message: str):
         entry = f"[{datetime.utcnow().strftime('%H:%M:%S')}] {message}"
         logs = self.task.setdefault("logs", [])
         logs.append(entry)
-        if len(logs) > 100:
-            self.task["logs"] = logs[-100:]
+        if len(logs) > 200:
+            self.task["logs"] = logs[-200:]
         log.info("[%s] %s", self.task["task_id"], message)

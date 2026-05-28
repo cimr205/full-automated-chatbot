@@ -132,6 +132,12 @@ async def get_task(task_id: str):
     return task
 
 
+@app.post("/tasks/{task_id}/stop")
+async def stop_task(task_id: str):
+    await redis_client.set(f"task:stop:{task_id}", "1", ex=3600)
+    return {"status": "stop_signal_sent", "task_id": task_id}
+
+
 @app.get("/tasks")
 async def list_tasks():
     tasks = await db.list_tasks(limit=50)
