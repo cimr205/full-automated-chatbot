@@ -209,9 +209,10 @@ async def chat(
     messages = [{"role": "system", "content": system}] + history
 
     content = ""
+    ai_timeout = 180 if key == "ollama" else 60
     for round_num in range(8):
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=ai_timeout) as client:
                 headers = {"Content-Type": "application/json"}
                 if key != "ollama":
                     headers["Authorization"] = f"Bearer {key}"
@@ -222,10 +223,14 @@ async def chat(
                           "temperature": 0.7, "max_tokens": max_tokens},
                 )
                 resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"].strip()
+                data = resp.json()
+                # Ollama (and some APIs) return {"error": "..."} on model errors
+                if "error" in data:
+                    raise Exception(data["error"])
+                content = data["choices"][0]["message"]["content"].strip()
         except Exception as e:
             err = str(e).lower()
-            if key == "ollama" and ("connect" in err or "refused" in err or "timeout" in err):
+            if key == "ollama" and any(x in err for x in ("connect", "refused", "timeout", "loading", "not found")):
                 return {"reply": "AI-modellen indlæses stadig (første start tager 2-5 min). Prøv igen om lidt ⏳"}
             log.error("AI call error (round %d): %s", round_num, e)
             return {"reply": f"AI fejl: {e}"}

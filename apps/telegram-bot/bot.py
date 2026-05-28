@@ -481,7 +481,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         result = await api_post(
             "/chat",
             {"message": text, "session_id": str(chat_id)},
-            timeout=120,
+            timeout=200,
         )
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")

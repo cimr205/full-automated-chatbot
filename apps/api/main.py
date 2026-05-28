@@ -303,30 +303,34 @@ async def web_chat(req: ChatMessage):
 
     result = await ai_chat(req.message, history, brain=brain, vault=vault)
 
-    # Handle task/goal creation
-    if result.get("action") == "task":
-        task_id = f"task_{uuid.uuid4().hex[:8]}"
-        task = {
-            "task_id": task_id,
-            "description": result["description"],
-            "priority": 5,
-            "status": "queued",
-            "created_at": datetime.utcnow().isoformat(),
-            "retry_count": 0,
-            "logs": [],
-            "checkpoints": [],
-        }
-        await task_queue.enqueue(task)
-        await db.save_task(task)
-        result["task_id"] = task_id
+    # Handle task/goal creation — wrapped so a DB error never kills the reply
+    try:
+        if result.get("action") == "task":
+            task_id = f"task_{uuid.uuid4().hex[:8]}"
+            task = {
+                "task_id": task_id,
+                "description": result["description"],
+                "priority": 5,
+                "status": "queued",
+                "created_at": datetime.utcnow().isoformat(),
+                "retry_count": 0,
+                "logs": [],
+                "checkpoints": [],
+            }
+            await task_queue.enqueue(task)
+            await db.save_task(task)
+            result["task_id"] = task_id
 
-    elif result.get("action") == "goal":
-        goal = await goal_engine.create_goal(
-            description=result["description"],
-            priority="normal",
-            recurring=result.get("recurring", False),
-        )
-        result["goal_id"] = goal["goal_id"]
+        elif result.get("action") == "goal":
+            goal = await goal_engine.create_goal(
+                description=result["description"],
+                priority="normal",
+                recurring=result.get("recurring", False),
+            )
+            result["goal_id"] = goal["goal_id"]
+    except Exception as e:
+        log.error("Task/goal creation error: %s", e)
+        result.pop("action", None)
 
     try:
         await redis_client.setex(history_key, 86400 * 7, json.dumps(history[-20:]))
