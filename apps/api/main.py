@@ -46,6 +46,8 @@ from core.memory.db import Database
 from core.memory.chromadb_client import ChromaMemory
 from core.memory.memory_manager import MemoryManager
 from core.goals.goal_engine import GoalEngine
+from core.memory.vault import SecureVault
+from core.memory.brain import Brain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -58,11 +60,13 @@ supervisor: Supervisor = None
 db: Database = None
 memory: MemoryManager = None
 goal_engine: GoalEngine = None
+vault: SecureVault = None
+brain: Brain = None
 
 
 @app.on_event("startup")
 async def startup():
-    global redis_client, task_queue, supervisor, db, memory, goal_engine
+    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
@@ -74,6 +78,8 @@ async def startup():
     chroma = ChromaMemory()
     memory = MemoryManager(db, chroma)
     goal_engine = GoalEngine(redis_client)
+    vault = SecureVault(redis_client)
+    brain = Brain(redis_client)
 
     supervisor = Supervisor(task_queue, db, redis_client, goal_engine, memory)
     asyncio.create_task(supervisor.run())
@@ -260,9 +266,7 @@ class ChatMessage(BaseModel):
 @app.post("/chat")
 async def web_chat(req: ChatMessage):
     from core.ai.chat import chat as ai_chat
-    from core.memory.brain import Brain
 
-    brain = Brain(redis_client)
     history_key = f"chat_history:{req.session_id}"
     try:
         raw = await redis_client.get(history_key)
@@ -270,7 +274,7 @@ async def web_chat(req: ChatMessage):
     except Exception:
         history = []
 
-    result = await ai_chat(req.message, history, brain=brain)
+    result = await ai_chat(req.message, history, brain=brain, vault=vault)
 
     # Handle task/goal creation
     if result.get("action") == "task":

@@ -488,7 +488,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         history = []
 
     # Call the full AI engine with brain context
-    result = await ai_chat(text, history, brain=brain, max_tokens=2000)
+    result = await ai_chat(text, history, brain=brain, vault=vault, max_tokens=2000)
 
     # Persist history (last 20 messages, 7-day TTL)
     try:

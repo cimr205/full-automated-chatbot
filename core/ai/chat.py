@@ -55,14 +55,14 @@ async def _tool_fetch(url: str) -> str:
         return f"Fetch fejlede: {e}"
 
 
-async def _tool_email_read(n: int = 5) -> str:
+async def _tool_email_read(n: int = 5, email_creds: dict = None) -> str:
     from core.tools.email_tool import read_emails
-    return await read_emails(n)
+    return await read_emails(n, overrides=email_creds)
 
 
-async def _tool_email_send(to: str, subject: str, body: str) -> str:
+async def _tool_email_send(to: str, subject: str, body: str, email_creds: dict = None) -> str:
     from core.tools.email_tool import send_email
-    return await send_email(to, subject, body)
+    return await send_email(to, subject, body, overrides=email_creds)
 
 
 def _tool_file_read(path: str) -> str:
@@ -158,6 +158,7 @@ async def chat(
     user_message: str,
     history: list,
     brain=None,
+    vault=None,
     max_tokens: int = 2000,
 ) -> dict:
     """
@@ -171,6 +172,18 @@ async def chat(
 
     brain_ctx = await brain.context_for_ai() if brain else ""
     system = build_system_prompt(brain_ctx)
+
+    # Fetch email credentials from vault if env vars not set
+    email_creds: dict = {}
+    if vault and not os.getenv("EMAIL_USER"):
+        try:
+            email_creds = {
+                "email_user": await vault.get("email_user") or "",
+                "email_password": await vault.get("email_password") or "",
+                "email_host": await vault.get("email_host") or "",
+            }
+        except Exception:
+            pass
 
     history.append({"role": "user", "content": user_message})
     messages = [{"role": "system", "content": system}] + history
@@ -223,7 +236,7 @@ async def chat(
         elif m := re.search(r'\[EMAIL_READ(?::\s*n=(\d+))?\]', content):
             n = int(m.group(1) or 5)
             log.info("Tool: email_read(n=%d)", n)
-            result = await _tool_email_read(n)
+            result = await _tool_email_read(n, email_creds=email_creds)
             messages += [{"role": "assistant", "content": content},
                          {"role": "user", "content": f"[EMAIL_READ resultat]:\n\n{result}"}]
             used_tool = True
@@ -232,7 +245,7 @@ async def chat(
         elif m := re.search(r'\[EMAIL_SEND:\s*to=([^|]+)\|?\s*subject=([^|]+)\|?\s*body=([^\]]+)\]', content, re.DOTALL):
             to, subject, body = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
             log.info("Tool: email_send(to=%s)", to)
-            result = await _tool_email_send(to, subject, body)
+            result = await _tool_email_send(to, subject, body, email_creds=email_creds)
             messages += [{"role": "assistant", "content": content},
                          {"role": "user", "content": f"[EMAIL_SEND resultat]: {result}"}]
             used_tool = True

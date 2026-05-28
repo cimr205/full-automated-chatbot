@@ -17,23 +17,24 @@ from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 
-def _get_cfg() -> dict:
+def _get_cfg(overrides: dict = None) -> dict:
+    ov = overrides or {}
     return {
-        "imap_host": os.getenv("EMAIL_HOST", "imap.gmail.com"),
-        "smtp_host": os.getenv("SMTP_HOST", os.getenv("EMAIL_HOST", "smtp.gmail.com")),
-        "smtp_port": int(os.getenv("SMTP_PORT", "587")),
-        "user": os.getenv("EMAIL_USER", ""),
-        "password": os.getenv("EMAIL_PASSWORD", ""),
+        "imap_host": ov.get("email_host") or os.getenv("EMAIL_HOST", "imap.gmail.com"),
+        "smtp_host": ov.get("smtp_host") or ov.get("email_host") or os.getenv("SMTP_HOST", os.getenv("EMAIL_HOST", "smtp.gmail.com")),
+        "smtp_port": int(ov.get("smtp_port") or os.getenv("SMTP_PORT", "587")),
+        "user": ov.get("email_user") or os.getenv("EMAIL_USER", ""),
+        "password": ov.get("email_password") or os.getenv("EMAIL_PASSWORD", ""),
     }
 
 
-def _configured() -> bool:
-    cfg = _get_cfg()
+def _configured(overrides: dict = None) -> bool:
+    cfg = _get_cfg(overrides)
     return bool(cfg["user"] and cfg["password"])
 
 
-def _read_emails_sync(n: int = 5, folder: str = "INBOX") -> list[dict]:
-    cfg = _get_cfg()
+def _read_emails_sync(n: int = 5, folder: str = "INBOX", overrides: dict = None) -> list[dict]:
+    cfg = _get_cfg(overrides)
     results = []
     try:
         mail = imaplib.IMAP4_SSL(cfg["imap_host"])
@@ -64,8 +65,8 @@ def _read_emails_sync(n: int = 5, folder: str = "INBOX") -> list[dict]:
     return list(reversed(results))
 
 
-def _send_email_sync(to: str, subject: str, body: str) -> str:
-    cfg = _get_cfg()
+def _send_email_sync(to: str, subject: str, body: str, overrides: dict = None) -> str:
+    cfg = _get_cfg(overrides)
     try:
         msg = MIMEMultipart()
         msg["From"] = cfg["user"]
@@ -81,10 +82,22 @@ def _send_email_sync(to: str, subject: str, body: str) -> str:
         return f"Failed to send email: {e}"
 
 
-async def read_emails(n: int = 5) -> str:
-    if not _configured():
-        return "Email ikke konfigureret. Sæt EMAIL_HOST, EMAIL_USER og EMAIL_PASSWORD i Railway Variables."
-    emails = await asyncio.get_event_loop().run_in_executor(None, _read_emails_sync, n)
+NOT_CONFIGURED_MSG = (
+    "EMAIL_IKKE_KONFIGURERET: Din email er ikke sat op endnu. "
+    "Gem dine credentials i vault'en:\n"
+    "`/vault save email_user din@email.com`\n"
+    "`/vault save email_password dit-kodeord`\n"
+    "Brug Gmail? Sæt også: `/vault save email_host imap.gmail.com`\n"
+    "Brug Outlook? Sæt: `/vault save email_host outlook.office365.com`"
+)
+
+
+async def read_emails(n: int = 5, overrides: dict = None) -> str:
+    if not _configured(overrides):
+        return NOT_CONFIGURED_MSG
+    emails = await asyncio.get_event_loop().run_in_executor(
+        None, _read_emails_sync, n, "INBOX", overrides
+    )
     if not emails:
         return "Ingen emails fundet."
     parts = []
@@ -100,9 +113,9 @@ async def read_emails(n: int = 5) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-async def send_email(to: str, subject: str, body: str) -> str:
-    if not _configured():
-        return "Email ikke konfigureret."
+async def send_email(to: str, subject: str, body: str, overrides: dict = None) -> str:
+    if not _configured(overrides):
+        return NOT_CONFIGURED_MSG
     return await asyncio.get_event_loop().run_in_executor(
-        None, _send_email_sync, to, subject, body
+        None, _send_email_sync, to, subject, body, overrides
     )
