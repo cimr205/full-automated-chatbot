@@ -234,10 +234,18 @@ async def chat(
                 content = data["choices"][0]["message"]["content"].strip()
         except Exception as e:
             err = str(e).lower()
-            if key == "ollama" and any(x in err for x in ("connect", "refused", "timeout", "loading", "not found")):
-                return {"reply": "AI-modellen indlæses stadig (første start tager 2-5 min). Prøv igen om lidt ⏳"}
             log.error("AI call error (round %d): %s", round_num, e)
-            return {"reply": f"AI fejl: {e}"}
+            if key == "ollama" and any(x in err for x in ("connect", "refused", "timeout", "loading", "not found")):
+                return {"reply": "Jeg starter op — det tager et øjeblik første gang. Prøv igen om lidt ⏳"}
+            if any(x in err for x in ("rate limit", "429", "too many")):
+                return {"reply": "For mange forespørgsler på én gang. Prøv igen om et øjeblik."}
+            if any(x in err for x in ("401", "403", "unauthorized", "forbidden", "invalid api")):
+                return {"reply": "API-nøglen virker ikke. Tjek GROQ_API_KEY eller OLLAMA_URL i dine Railway Variables."}
+            if any(x in err for x in ("timeout", "timed out", "read timeout")):
+                return {"reply": "Svaret tog for lang tid. Prøv igen — eller stil et kortere spørgsmål."}
+            if any(x in err for x in ("context length", "too long", "maximum context", "tokens")):
+                return {"reply": "Beskeden er for lang. Prøv at rydde chatten (/clear) og stil spørgsmålet igen."}
+            return {"reply": "Noget gik galt bag kulisserne. Prøv igen."}
 
         used_tool = False
 
