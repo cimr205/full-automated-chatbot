@@ -365,7 +365,10 @@ async def get_settings():
         settings = {}
     # Merge with current env vars (env vars take precedence)
     return {
-        "model": os.getenv("GROQ_MODEL", settings.get("model", "grok-3")),
+        "ollama_configured": bool(os.getenv("OLLAMA_URL")),
+        "ollama_url": os.getenv("OLLAMA_URL", ""),
+        "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.2:1b"),
+        "model": os.getenv("GROQ_MODEL", settings.get("model", "grok-3-mini")),
         "progress_interval": int(os.getenv("PROGRESS_INTERVAL", settings.get("progress_interval", "120"))),
         "max_task_steps": int(os.getenv("MAX_TASK_STEPS", settings.get("max_task_steps", "200"))),
         "email_configured": bool(os.getenv("EMAIL_USER")),

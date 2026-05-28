@@ -17,6 +17,12 @@ _AI_MODEL: Optional[str] = None
 
 
 def _get_endpoint() -> tuple[str, str, str]:
+    # Ollama takes priority if OLLAMA_URL is set
+    ollama_url = os.getenv("OLLAMA_URL", "").rstrip("/")
+    if ollama_url:
+        model = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+        return "ollama", f"{ollama_url}/v1/chat/completions", model
+
     key = os.getenv("GROQ_API_KEY", "")
     if not key:
         return "", "", ""
@@ -182,7 +188,7 @@ async def chat(
     """
     key, url, model = _get_endpoint()
     if not key:
-        return {"reply": "Sæt GROQ_API_KEY i Railway Variables for at aktivere AI."}
+        return {"reply": "Ingen AI konfigureret. Sæt OLLAMA_URL (Ollama) eller GROQ_API_KEY (xAI/Groq) i Railway Variables."}
 
     brain_ctx = await brain.context_for_ai() if brain else ""
     system = build_system_prompt(brain_ctx)
@@ -206,9 +212,12 @@ async def chat(
     for round_num in range(8):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
+                headers = {"Content-Type": "application/json"}
+                if key != "ollama":
+                    headers["Authorization"] = f"Bearer {key}"
                 resp = await client.post(
                     url,
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    headers=headers,
                     json={"model": model, "messages": messages,
                           "temperature": 0.7, "max_tokens": max_tokens},
                 )
