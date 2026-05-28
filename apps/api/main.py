@@ -46,6 +46,8 @@ from core.memory.db import Database
 from core.memory.chromadb_client import ChromaMemory
 from core.memory.memory_manager import MemoryManager
 from core.goals.goal_engine import GoalEngine
+from core.memory.vault import SecureVault
+from core.memory.brain import Brain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -58,11 +60,13 @@ supervisor: Supervisor = None
 db: Database = None
 memory: MemoryManager = None
 goal_engine: GoalEngine = None
+vault: SecureVault = None
+brain: Brain = None
 
 
 @app.on_event("startup")
 async def startup():
-    global redis_client, task_queue, supervisor, db, memory, goal_engine
+    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
@@ -74,6 +78,8 @@ async def startup():
     chroma = ChromaMemory()
     memory = MemoryManager(db, chroma)
     goal_engine = GoalEngine(redis_client)
+    vault = SecureVault(redis_client)
+    brain = Brain(redis_client)
 
     supervisor = Supervisor(task_queue, db, redis_client, goal_engine, memory)
     asyncio.create_task(supervisor.run())
@@ -275,6 +281,112 @@ async def save_lead(lead: LeadEntry):
 async def search_leads(q: str, n: int = 10):
     results = await memory.find_leads(q, n_results=n)
     return results
+
+
+# ── Web Chat ─────────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    message: str
+    session_id: str = "web"
+
+
+@app.post("/chat")
+async def web_chat(req: ChatMessage):
+    from core.ai.chat import chat as ai_chat
+
+    history_key = f"chat_history:{req.session_id}"
+    try:
+        raw = await redis_client.get(history_key)
+        history = json.loads(raw) if raw else []
+    except Exception:
+        history = []
+
+    result = await ai_chat(req.message, history, brain=brain, vault=vault)
+
+    # Handle task/goal creation
+    if result.get("action") == "task":
+        task_id = f"task_{uuid.uuid4().hex[:8]}"
+        task = {
+            "task_id": task_id,
+            "description": result["description"],
+            "priority": 5,
+            "status": "queued",
+            "created_at": datetime.utcnow().isoformat(),
+            "retry_count": 0,
+            "logs": [],
+            "checkpoints": [],
+        }
+        await task_queue.enqueue(task)
+        await db.save_task(task)
+        result["task_id"] = task_id
+
+    elif result.get("action") == "goal":
+        goal = await goal_engine.create_goal(
+            description=result["description"],
+            priority="normal",
+            recurring=result.get("recurring", False),
+        )
+        result["goal_id"] = goal["goal_id"]
+
+    try:
+        await redis_client.setex(history_key, 86400 * 7, json.dumps(history[-20:]))
+    except Exception:
+        pass
+
+    return result
+
+
+@app.get("/chat/history")
+async def chat_history(session_id: str = "web"):
+    try:
+        raw = await redis_client.get(f"chat_history:{session_id}")
+        return json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+
+@app.delete("/chat/history")
+async def clear_chat_history(session_id: str = "web"):
+    await redis_client.delete(f"chat_history:{session_id}")
+    return {"status": "cleared"}
+
+
+# ── Settings ─────────────────────────────────────────────────────────────────
+
+SETTINGS_KEY = "settings:config"
+
+
+@app.get("/settings")
+async def get_settings():
+    try:
+        raw = await redis_client.hgetall(SETTINGS_KEY)
+        settings = dict(raw or {})
+    except Exception:
+        settings = {}
+    # Merge with current env vars (env vars take precedence)
+    return {
+        "model": os.getenv("GROQ_MODEL", settings.get("model", "grok-3")),
+        "progress_interval": int(os.getenv("PROGRESS_INTERVAL", settings.get("progress_interval", "120"))),
+        "max_task_steps": int(os.getenv("MAX_TASK_STEPS", settings.get("max_task_steps", "200"))),
+        "email_configured": bool(os.getenv("EMAIL_USER")),
+        "email_user": os.getenv("EMAIL_USER", ""),
+        "vault_configured": bool(os.getenv("VAULT_MASTER_KEY")),
+        "api_key_set": bool(os.getenv("GROQ_API_KEY")),
+        "telegram_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+    }
+
+
+class SettingsUpdate(BaseModel):
+    model: Optional[str] = None
+    progress_interval: Optional[int] = None
+
+
+@app.post("/settings")
+async def update_settings(s: SettingsUpdate):
+    data = {k: str(v) for k, v in s.dict(exclude_none=True).items()}
+    if data:
+        await redis_client.hset(SETTINGS_KEY, mapping=data)
+    return {"status": "saved", **data}
 
 
 # ── Screenshots ───────────────────────────────────────────────────────────────
