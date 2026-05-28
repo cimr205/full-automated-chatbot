@@ -6,12 +6,14 @@ import random
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from core.queue.task_queue import TaskQueue
 from core.supervisor.supervisor import HumanRequiredError
+from core.memory.vault import SecureVault
 from workers.browser.ollama_client import OllamaClient
 
 log = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class BrowserWorker:
         self.redis = redis
         self.memory = memory
         self.ollama = OllamaClient()
+        self._vault = SecureVault(redis)
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._consecutive_waits = 0
@@ -188,11 +191,47 @@ class BrowserWorker:
         if t == "complete":
             return
 
+        if t == "login":
+            domain = action.get("domain") or self._domain_key()
+            email, password = await self._get_saved_credentials(domain)
+            if email and password:
+                attempted = await self._auto_login(domain, screenshot_path)
+                if attempted:
+                    return
+            # No saved creds — ask user
+            await self._send_screenshot_notification(
+                screenshot_path,
+                f"Login påkrævet for '{domain}'. Svar med:\nemail: din@email.com\nkodeord: DitKodeord"
+            )
+            reply = await self._wait_for_human_reply()
+            parsed = self._parse_credential_reply(reply)
+            if parsed["email"] or parsed["password"]:
+                await self._save_credentials(domain, parsed["email"], parsed["password"])
+                await self._auto_login(domain, screenshot_path)
+            else:
+                await self._handle_human_reply(reply)
+            return
+
         if t == "need_human":
             reason = action.get("reason", "Input påkrævet")
+            domain = self._domain_key()
+            # Auto-intercept login/credential requests
+            lower_reason = reason.lower()
+            if any(w in lower_reason for w in ("login", "log in", "password", "kodeord", "sign in", "credentials", "2fa", "captcha")):
+                email, password = await self._get_saved_credentials(domain)
+                if email and password and "2fa" not in lower_reason and "captcha" not in lower_reason:
+                    attempted = await self._auto_login(domain, screenshot_path)
+                    if attempted:
+                        return
             await self._send_screenshot_notification(screenshot_path, reason)
             reply = await self._wait_for_human_reply()
-            await self._handle_human_reply(reply)
+            # If human replies with credentials, save them
+            parsed = self._parse_credential_reply(reply)
+            if parsed["email"] or parsed["password"]:
+                await self._save_credentials(domain, parsed["email"], parsed["password"])
+                await self._auto_login(domain, screenshot_path)
+            else:
+                await self._handle_human_reply(reply)
             return
 
         if t == "approve_required":
@@ -267,12 +306,14 @@ Reply with ONLY one JSON action:
 {{"type": "scroll", "direction": "down", "amount": 500}}
 {{"type": "extract", "fields": ["field1", "field2"]}}
 {{"type": "wait", "seconds": 2}}
+{{"type": "login", "domain": "SITE_NAME"}}
 {{"type": "need_human", "reason": "EXPLAIN_EXACTLY_WHAT_IS_NEEDED"}}
 {{"type": "approve_required", "description": "DESCRIBE_IRREVERSIBLE_ACTION"}}
 {{"type": "complete"}}
 
 Rules:
-- need_human: logins, captchas, 2FA codes, blocked pages
+- login: use when you see a login form — the system will auto-fill saved credentials or ask the user once and remember them forever
+- need_human: captchas, 2FA codes, or anything that is NOT a standard email+password login
 - approve_required: before sending emails, posting, paying
 - complete: only when the task outcome is fully achieved
 - Never guess or fabricate results
@@ -392,6 +433,33 @@ JSON:"""
             await pubsub.aclose()
         return ""
 
+    def _parse_credential_reply(self, reply: str) -> dict:
+        """
+        Parse replies of the form:
+          email: foo@bar.com
+          kodeord: secret
+        or plain "foo@bar.com Cimraansej1@" style.
+        Returns {"email": ..., "password": ...} with empty strings when not found.
+        """
+        import re as _re
+        email, password = "", ""
+        lines = reply.strip().splitlines()
+        for line in lines:
+            low = line.lower()
+            if _re.match(r'e?mail\s*:\s*', low):
+                email = _re.sub(r'^e?mail\s*:\s*', '', line, flags=_re.IGNORECASE).strip()
+            elif _re.match(r'(password|kodeord|adgangskode|pass)\s*:\s*', low):
+                password = _re.sub(r'^(password|kodeord|adgangskode|pass)\s*:\s*', '', line, flags=_re.IGNORECASE).strip()
+        # Fallback: single line with email + space + password
+        if not email and not password and len(lines) == 1:
+            parts = lines[0].split()
+            for p in parts:
+                if "@" in p and not email:
+                    email = p
+                elif not password and p != email:
+                    password = p
+        return {"email": email, "password": password}
+
     async def _handle_human_reply(self, reply: str):
         self._log(f"Human: {reply}")
         lower = reply.lower().strip()
@@ -418,3 +486,100 @@ JSON:"""
         if len(logs) > 200:
             self.task["logs"] = logs[-200:]
         log.info("[%s] %s", self.task["task_id"], message)
+
+    # ── Credential helpers ────────────────────────────────────────────────────
+
+    def _domain_key(self, url: str = "") -> str:
+        """Return a short domain slug, e.g. 'lovable' from 'https://lovable.dev/...'"""
+        try:
+            host = urlparse(url or (self._page.url if self._page else "")).hostname or ""
+            parts = host.split(".")
+            # Drop 'www' prefix, take the main name portion
+            parts = [p for p in parts if p != "www"]
+            return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "site")
+        except Exception:
+            return "site"
+
+    async def _get_saved_credentials(self, domain: str) -> tuple[str, str]:
+        """Return (email, password) for domain from vault, or ("", "")."""
+        try:
+            email = await self._vault.get(f"{domain}_email") or ""
+            password = await self._vault.get(f"{domain}_password") or ""
+            return email, password
+        except Exception:
+            return "", ""
+
+    async def _save_credentials(self, domain: str, email: str, password: str):
+        try:
+            if email:
+                await self._vault.save(f"{domain}_email", email)
+            if password:
+                await self._vault.save(f"{domain}_password", password)
+            self._log(f"🔐 Credentials gemt for '{domain}'")
+        except Exception as e:
+            log.warning("Could not save credentials: %s", e)
+
+    async def _auto_login(self, domain: str, screenshot_path: str) -> bool:
+        """Try to fill login form with saved credentials. Returns True if attempted."""
+        email, password = await self._get_saved_credentials(domain)
+        if not email or not password:
+            return False
+
+        self._log(f"🔑 Bruger gemte credentials for '{domain}'")
+
+        # Common email/username selectors
+        email_selectors = [
+            'input[type="email"]',
+            'input[name="email"]',
+            'input[name="username"]',
+            'input[id="email"]',
+            'input[placeholder*="email" i]',
+            'input[placeholder*="mail" i]',
+        ]
+        password_selectors = [
+            'input[type="password"]',
+            'input[name="password"]',
+            'input[id="password"]',
+        ]
+
+        filled_email = False
+        for sel in email_selectors:
+            try:
+                if await self._page.locator(sel).count() > 0:
+                    await self._page.fill(sel, email, timeout=3000)
+                    filled_email = True
+                    break
+            except Exception:
+                continue
+
+        filled_pass = False
+        for sel in password_selectors:
+            try:
+                if await self._page.locator(sel).count() > 0:
+                    await self._page.fill(sel, password, timeout=3000)
+                    filled_pass = True
+                    break
+            except Exception:
+                continue
+
+        if filled_email or filled_pass:
+            await asyncio.sleep(0.5)
+            # Try to click submit
+            submit_selectors = [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Log in")',
+                'button:has-text("Sign in")',
+                'button:has-text("Login")',
+                'button:has-text("Continue")',
+            ]
+            for sel in submit_selectors:
+                try:
+                    if await self._page.locator(sel).count() > 0:
+                        await self._page.locator(sel).first.click(timeout=3000)
+                        break
+                except Exception:
+                    continue
+            self._log(f"✅ Auto-login forsøgt for '{domain}'")
+            return True
+        return False

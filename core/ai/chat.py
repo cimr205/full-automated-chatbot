@@ -144,6 +144,10 @@ Gem credentials sikkert i vault:
 Browser-automatisering (navigering, login, scraping):
 [CREATE_TASK: precise English description]
 
+Gem login-credentials til et site (huskes automatisk fremover):
+[VAULT_SAVE: sitename_email=din@email.com]
+[VAULT_SAVE: sitename_password=DitKodeord]
+
 Løbende/gentaget automatisering:
 [CREATE_GOAL: precise English description | recurring: true]
 
