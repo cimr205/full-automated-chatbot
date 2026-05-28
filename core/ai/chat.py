@@ -224,6 +224,9 @@ async def chat(
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
+            err = str(e).lower()
+            if key == "ollama" and ("connect" in err or "refused" in err or "timeout" in err):
+                return {"reply": "AI-modellen indlæses stadig (første start tager 2-5 min). Prøv igen om lidt ⏳"}
             log.error("AI call error (round %d): %s", round_num, e)
             return {"reply": f"AI fejl: {e}"}
 

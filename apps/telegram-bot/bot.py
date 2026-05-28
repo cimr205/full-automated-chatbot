@@ -19,7 +19,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 # Make sure monorepo root is importable (also set via PYTHONPATH=/app in Dockerfile)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from core.ai.chat import chat as ai_chat
 from core.memory.brain import Brain
 from core.memory.vault import SecureVault
 
@@ -60,8 +59,8 @@ async def api_get(path: str) -> dict:
         return resp.json()
 
 
-async def api_post(path: str, body: dict) -> dict:
-    async with httpx.AsyncClient(timeout=10) as client:
+async def api_post(path: str, body: dict, timeout: int = 10) -> dict:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{API_URL}{path}", json=body)
         resp.raise_for_status()
         return resp.json()
@@ -464,74 +463,49 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
     await _ws_event("telegram_in", f"User: {text}")
 
-    # Check if a browser task is waiting for a human reply
-    pending_key = "bot:pending_task"
-    pending_task_id = await redis_client.get(pending_key)
+    # Route reply to waiting browser task if one is pending
+    pending_task_id = await redis_client.get("bot:pending_task")
     if pending_task_id:
-        await redis_client.delete(pending_key)
+        await redis_client.delete("bot:pending_task")
         await redis_client.publish(
             f"human_reply:{pending_task_id}",
             json.dumps({"task_id": pending_task_id, "message": text})
         )
         await update.message.reply_text(
-            f"Svar sendt til opgave `{pending_task_id}`.",
-            parse_mode="Markdown"
+            f"Svar sendt til `{pending_task_id}`.", parse_mode="Markdown"
         )
         return
 
-    # Load chat history from Redis
-    history_key = f"chat_history:{chat_id}"
+    # Delegate all AI processing to the API service (which has Ollama running)
     try:
-        raw = await redis_client.get(history_key)
-        history = json.loads(raw) if raw else []
-    except Exception:
-        history = []
-
-    # Call the full AI engine with brain context
-    result = await ai_chat(text, history, brain=brain, vault=vault, max_tokens=2000)
-
-    # Persist history (last 20 messages, 7-day TTL)
-    try:
-        await redis_client.setex(history_key, 86400 * 7, json.dumps(history[-20:]))
-    except Exception:
-        pass
+        result = await api_post(
+            "/chat",
+            {"message": text, "session_id": str(chat_id)},
+            timeout=120,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+        return
 
     reply = result.get("reply", "Hvad kan jeg hjælpe med?")
     action = result.get("action")
 
     if action == "task":
-        desc = result.get("description", text)
-        try:
-            data = await api_post("/tasks", {"description": desc})
-            task_id = data["task_id"]
-            await _ws_event("telegram_out", f"Task queued: {desc[:80]}", task_id)
-            full_reply = (
-                f"{reply}\n\n"
-                f"ID: `{task_id}`\n"
-                f"Følg med: /status {task_id} · Stop: /stop {task_id}"
-            )
-            await update.message.reply_text(full_reply, parse_mode="Markdown")
-        except Exception as e:
-            await update.message.reply_text(f"{reply}\n\n(Fejl ved oprettelse: {e})")
-
+        task_id = result.get("task_id")
+        if task_id:
+            await _ws_event("telegram_out", f"Task queued", task_id)
+            reply = f"{reply}\n\nID: `{task_id}`\nFølg med: /status {task_id} · Stop: /stop {task_id}"
     elif action == "goal":
-        desc = result.get("description", text)
-        recurring = result.get("recurring", False)
-        try:
-            data = await api_post("/goals", {"description": desc, "recurring": recurring})
-            await _ws_event("telegram_out", f"Goal created: {desc[:80]}", data["goal_id"])
-            full_reply = f"{reply}\n\nID: `{data['goal_id']}`"
-            await update.message.reply_text(full_reply, parse_mode="Markdown")
-        except Exception as e:
-            await update.message.reply_text(f"{reply}\n\n(Fejl: {e})")
+        goal_id = result.get("goal_id")
+        if goal_id:
+            await _ws_event("telegram_out", f"Goal created", goal_id)
+            reply = f"{reply}\n\nID: `{goal_id}`"
 
-    else:
-        await _ws_event("telegram_out", f"Bot: {reply[:200]}")
-        # Telegram Markdown is strict — send as plain text if it might have issues
-        try:
-            await update.message.reply_text(reply, parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text(reply)
+    await _ws_event("telegram_out", f"Bot: {reply[:200]}")
+    try:
+        await update.message.reply_text(reply, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(reply)
 
 
 # ── Notification listener ─────────────────────────────────────────────────────
