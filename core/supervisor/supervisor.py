@@ -114,7 +114,15 @@ class Supervisor:
         return task
 
     async def _run_task(self, task: dict):
-        from workers.browser.browser_worker import BrowserWorker
+        try:
+            from workers.browser.browser_worker import BrowserWorker
+        except Exception as e:
+            log.error("BrowserWorker unavailable (Playwright not installed?): %s", e)
+            task["status"] = "failed"
+            task["error"] = f"Browser worker unavailable: {e}"
+            await self._update(task)
+            await self._notify(task["task_id"], f"Browser not available: {e}")
+            return
 
         task["status"] = "running"
         task["started_at"] = datetime.utcnow().isoformat()

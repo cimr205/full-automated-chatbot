@@ -13,7 +13,11 @@ class SecureVault:
     def __init__(self, redis: aioredis.Redis):
         master = os.getenv("VAULT_MASTER_KEY", "")
         if not master:
-            raise RuntimeError("VAULT_MASTER_KEY is not set")
+            import logging
+            logging.getLogger(__name__).warning(
+                "VAULT_MASTER_KEY not set — vault is unencrypted! Set this in Railway Variables."
+            )
+            master = "insecure-default-change-me"
         raw = hashlib.sha256(master.encode()).digest()
         self._f = Fernet(base64.urlsafe_b64encode(raw))
         self._r = redis

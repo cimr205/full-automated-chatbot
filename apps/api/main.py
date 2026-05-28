@@ -113,6 +113,12 @@ async def create_task(req: TaskRequest):
     }
     await task_queue.enqueue(task)
     await db.save_task(task)
+    try:
+        await redis_client.publish("ws:events", json.dumps({
+            "type": "task_update", "task_id": task_id, "status": "queued"
+        }))
+    except Exception:
+        pass
     return {"task_id": task_id, "status": "queued"}
 
 
@@ -128,7 +134,22 @@ async def get_task(task_id: str):
 
 @app.get("/tasks")
 async def list_tasks():
-    return await db.list_tasks(limit=50)
+    tasks = await db.list_tasks(limit=50)
+    if not tasks:
+        # Redis fallback when Postgres is not connected
+        try:
+            keys = await redis_client.keys("task:state:*")
+            for key in keys[:50]:
+                raw = await redis_client.get(key)
+                if raw:
+                    try:
+                        tasks.append(json.loads(raw))
+                    except Exception:
+                        pass
+            tasks.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+        except Exception:
+            pass
+    return tasks
 
 
 @app.post("/tasks/human-reply")
