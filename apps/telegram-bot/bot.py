@@ -16,8 +16,8 @@ import redis.asyncio as aioredis
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Make sure monorepo root is importable
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Make sure monorepo root is importable (also set via PYTHONPATH=/app in Dockerfile)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from core.ai.chat import chat as ai_chat
 from core.memory.brain import Brain
