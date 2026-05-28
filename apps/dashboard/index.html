@@ -3,481 +3,687 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Execution System — Dashboard</title>
+<title>Autonomous System</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
-  body {
-    background: #0a0a0f;
-    color: #e2e8f0;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 13px;
-    height: 100vh;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
+:root {
+  --bg: #07070d;
+  --bg2: #0d0d18;
+  --bg3: #12121f;
+  --border: #1e1e35;
+  --accent: #7c3aed;
+  --accent2: #6d28d9;
+  --text: #e2e8f0;
+  --muted: #64748b;
+  --green: #10b981;
+  --yellow: #f59e0b;
+  --red: #ef4444;
+  --blue: #38bdf8;
+  --purple: #a78bfa;
+}
 
-  /* ── Header ── */
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 20px;
-    background: #0d0d14;
-    border-bottom: 1px solid #1e1e2e;
-    flex-shrink: 0;
-  }
-  .logo { font-size: 14px; font-weight: 700; color: #7c3aed; letter-spacing: 0.05em; }
-  .status-bar { display: flex; gap: 20px; align-items: center; }
-  .indicator { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #94a3b8; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: #374151; }
-  .dot.green { background: #10b981; box-shadow: 0 0 6px #10b981; }
-  .dot.yellow { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
-  .dot.red { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
-  .ws-status { font-size: 11px; color: #4b5563; }
-  .ws-status.connected { color: #10b981; }
+body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 
-  /* ── Layout ── */
-  .grid {
-    display: grid;
-    grid-template-columns: 280px 1fr 300px;
-    grid-template-rows: 1fr 220px;
-    gap: 1px;
-    background: #1e1e2e;
-    flex: 1;
-    overflow: hidden;
-  }
+/* ── Header ── */
+header { display: flex; align-items: center; justify-content: space-between; padding: 0 20px; height: 48px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.logo { font-size: 13px; font-weight: 700; color: var(--accent); letter-spacing: 0.08em; display: flex; align-items: center; gap: 8px; }
+.logo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.status-bar { display: flex; gap: 16px; align-items: center; }
+.ind { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #374151; }
+.dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.warn { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+.dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.ws-tag { font-size: 10px; color: var(--muted); border: 1px solid var(--border); padding: 1px 7px; border-radius: 10px; }
+.ws-tag.ok { color: var(--green); border-color: var(--green); }
 
-  .panel {
-    background: #0a0a0f;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .panel-header {
-    padding: 10px 14px;
-    background: #0d0d14;
-    border-bottom: 1px solid #1e1e2e;
-    font-size: 11px;
-    font-weight: 600;
-    color: #7c3aed;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
-  }
-  .panel-body { flex: 1; overflow-y: auto; padding: 10px; }
-  .panel-body::-webkit-scrollbar { width: 4px; }
-  .panel-body::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 2px; }
+/* ── Tabs ── */
+.tabs { display: flex; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 20px; gap: 2px; }
+.tab { padding: 8px 18px; font-size: 12px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: all 0.15s; user-select: none; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-  /* ── Tasks ── */
-  .task-item {
-    padding: 10px;
-    border: 1px solid #1e1e2e;
-    border-radius: 6px;
-    margin-bottom: 8px;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-  .task-item:hover { border-color: #7c3aed; }
-  .task-item.active { border-color: #7c3aed; background: #0d0b1a; }
-  .task-id { font-size: 10px; color: #4b5563; margin-bottom: 4px; }
-  .task-desc { font-size: 12px; color: #cbd5e1; line-height: 1.4; margin-bottom: 6px; }
-  .task-meta { display: flex; align-items: center; gap: 8px; }
-  .badge {
-    font-size: 10px;
-    padding: 2px 7px;
-    border-radius: 3px;
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-  .badge-running { background: #1d4ed8; color: #93c5fd; }
-  .badge-queued { background: #374151; color: #9ca3af; }
-  .badge-completed { background: #064e3b; color: #6ee7b7; }
-  .badge-failed { background: #7f1d1d; color: #fca5a5; }
-  .badge-waiting { background: #78350f; color: #fcd34d; }
-  .badge-retrying { background: #4c1d95; color: #c4b5fd; }
+/* ── Tab content ── */
+.tab-content { display: none; flex: 1; overflow: hidden; }
+.tab-content.active { display: flex; }
 
-  /* ── Live logs ── */
-  .log-container {
-    grid-column: 2;
-    grid-row: 1 / 3;
-  }
-  .log-line {
-    font-size: 12px;
-    line-height: 1.6;
-    padding: 1px 0;
-    color: #94a3b8;
-    border-bottom: 1px solid #0d0d14;
-    word-break: break-all;
-  }
-  .log-line.new { color: #e2e8f0; }
-  .log-line .ts { color: #4b5563; margin-right: 8px; font-size: 10px; }
-  .log-line.system { color: #7c3aed; }
-  .log-line.error { color: #ef4444; }
-  .log-line.success { color: #10b981; }
-  .log-line.telegram-in { color: #38bdf8; }
-  .log-line.telegram-out { color: #a78bfa; }
-  .log-empty { color: #374151; font-size: 12px; padding: 20px; text-align: center; }
+/* ── Monitor tab ── */
+.monitor-grid { display: grid; grid-template-columns: 260px 1fr 280px; grid-template-rows: 1fr 200px; gap: 1px; background: var(--border); flex: 1; overflow: hidden; }
+.panel { background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
+.ph { padding: 8px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+.pb { flex: 1; overflow-y: auto; padding: 8px; }
+.pb::-webkit-scrollbar { width: 3px; }
+.pb::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  /* ── Goals ── */
-  .goal-item {
-    padding: 10px;
-    border: 1px solid #1e1e2e;
-    border-radius: 6px;
-    margin-bottom: 8px;
-  }
-  .goal-id { font-size: 10px; color: #4b5563; margin-bottom: 4px; }
-  .goal-desc { font-size: 12px; color: #cbd5e1; line-height: 1.4; margin-bottom: 6px; }
-  .goal-meta { display: flex; gap: 6px; align-items: center; }
-  .priority { font-size: 10px; color: #7c3aed; }
-  .recurring { font-size: 10px; color: #f59e0b; }
+/* Tasks */
+.task-item { padding: 9px 10px; border: 1px solid var(--border); border-radius: 5px; margin-bottom: 6px; cursor: pointer; transition: border-color 0.1s; }
+.task-item:hover { border-color: var(--accent); }
+.task-item.sel { border-color: var(--accent); background: #0f0a1f; }
+.tid { font-size: 9px; color: var(--muted); margin-bottom: 3px; }
+.tdesc { font-size: 12px; color: #cbd5e1; line-height: 1.35; margin-bottom: 5px; }
+.tmeta { display: flex; align-items: center; gap: 6px; }
+.badge { font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; text-transform: uppercase; }
+.b-running { background: #1d4ed8; color: #93c5fd; }
+.b-queued { background: #1f2937; color: #9ca3af; }
+.b-completed { background: #064e3b; color: #6ee7b7; }
+.b-failed { background: #7f1d1d; color: #fca5a5; }
+.b-waiting { background: #78350f; color: #fcd34d; }
+.b-retrying { background: #4c1d95; color: #c4b5fd; }
 
-  /* ── Screenshot ── */
-  .screenshot-panel {
-    grid-column: 1 / 2;
-  }
-  .screenshot-img {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    background: #050508;
-  }
-  .screenshot-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: #374151;
-    font-size: 12px;
-  }
+/* Activity */
+.log-container { grid-column: 2; grid-row: 1 / 3; }
+.log-line { font-size: 11px; line-height: 1.7; padding: 1px 2px; color: #64748b; word-break: break-word; }
+.log-line.fresh { color: var(--text); }
+.log-ts { color: #374151; margin-right: 6px; font-size: 10px; }
+.log-line.sys { color: var(--accent); }
+.log-line.err { color: var(--red); }
+.log-line.ok { color: var(--green); }
+.log-line.tg-in { color: var(--blue); }
+.log-line.tg-out { color: var(--purple); }
+.empty { color: #374151; font-size: 12px; padding: 20px; text-align: center; }
 
-  /* ── Health bar ── */
-  .health-panel {
-    grid-column: 3;
-    grid-row: 2;
-  }
-  .health-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px solid #0d0d14;
-    font-size: 12px;
-  }
-  .health-label { color: #94a3b8; }
-  .health-val { color: #e2e8f0; font-weight: 600; }
-  .health-val.ok { color: #10b981; }
-  .health-val.err { color: #ef4444; }
+/* Goals */
+.goal-item { padding: 9px 10px; border: 1px solid var(--border); border-radius: 5px; margin-bottom: 6px; }
+.gdesc { font-size: 12px; color: #cbd5e1; margin: 3px 0 5px; line-height: 1.35; }
+.gmeta { display: flex; gap: 6px; font-size: 10px; }
+.gprio { color: var(--accent); }
+.grec { color: var(--yellow); }
 
-  .count-badge {
-    background: #1e1e2e;
-    color: #94a3b8;
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 10px;
-  }
+/* Screenshot */
+.ss-panel { grid-column: 1; grid-row: 2; }
+.ss-img { width: 100%; height: 100%; object-fit: contain; background: #030306; }
+.ss-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #374151; font-size: 11px; }
 
-  /* scrollbar for log */
-  .log-body { padding: 6px 10px; }
+/* Health */
+.health-panel { grid-column: 3; grid-row: 2; }
+.hrow { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #0d0d18; font-size: 12px; }
+.hlabel { color: var(--muted); }
+.hval { color: var(--text); font-weight: 600; }
+.hval.ok { color: var(--green); }
+.cbadge { background: var(--border); color: var(--muted); font-size: 9px; padding: 1px 5px; border-radius: 8px; }
+
+/* ── Chat tab ── */
+.chat-layout { flex: 1; display: flex; flex-direction: column; max-width: 900px; margin: 0 auto; width: 100%; padding: 0 20px; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 20px 0; display: flex; flex-direction: column; gap: 16px; }
+.chat-messages::-webkit-scrollbar { width: 4px; }
+.chat-messages::-webkit-scrollbar-thumb { background: var(--border); }
+.msg { display: flex; flex-direction: column; max-width: 80%; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+.msg.bot { align-self: flex-start; }
+.msg-bubble { padding: 10px 14px; border-radius: 12px; line-height: 1.6; font-size: 13px; white-space: pre-wrap; }
+.msg.user .msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+.msg.bot .msg-bubble { background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+.msg-time { font-size: 10px; color: var(--muted); margin-top: 3px; padding: 0 4px; }
+.msg-task { font-size: 10px; color: var(--accent); margin-top: 4px; padding: 0 4px; }
+.chat-input-area { padding: 16px 0; border-top: 1px solid var(--border); display: flex; gap: 10px; flex-shrink: 0; }
+.chat-input { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 10px 14px; font-family: inherit; font-size: 13px; outline: none; resize: none; min-height: 44px; max-height: 120px; transition: border-color 0.15s; }
+.chat-input:focus { border-color: var(--accent); }
+.send-btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 0 18px; cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 600; transition: background 0.15s; }
+.send-btn:hover { background: var(--accent2); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.chat-tools { display: flex; gap: 8px; padding: 8px 0; }
+.tool-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 5px; font-size: 11px; cursor: pointer; font-family: inherit; transition: all 0.1s; }
+.tool-btn:hover { border-color: var(--accent); color: var(--accent); }
+.typing { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; padding: 4px 0; }
+.typing-dots span { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: bounce 1.2s infinite; }
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+
+/* Code blocks in chat */
+.msg-bubble pre { background: #0a0a14; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; font-size: 12px; }
+.msg-bubble code { background: #0a0a14; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+
+/* ── Settings tab ── */
+.settings-layout { flex: 1; overflow-y: auto; padding: 24px; }
+.settings-layout::-webkit-scrollbar { width: 4px; }
+.settings-layout::-webkit-scrollbar-thumb { background: var(--border); }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1000px; }
+.settings-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.sc-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.sc-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.sc-row:last-child { border-bottom: none; }
+.sc-label { color: var(--muted); font-size: 12px; }
+.sc-val { color: var(--text); font-size: 12px; font-weight: 600; }
+.sc-val.ok { color: var(--green); }
+.sc-val.warn { color: var(--yellow); }
+.sc-val.err { color: var(--red); }
+.sc-input { background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 5px; font-family: inherit; font-size: 12px; width: 160px; outline: none; }
+.sc-input:focus { border-color: var(--accent); }
+.sc-btn { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 5px 12px; font-family: inherit; font-size: 11px; cursor: pointer; }
+.sc-btn:hover { background: var(--accent2); }
+.integration { display: flex; align-items: center; justify-content: space-between; padding: 10px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }
+.int-name { font-size: 12px; font-weight: 600; }
+.int-desc { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.int-status { font-size: 10px; padding: 3px 8px; border-radius: 10px; font-weight: 600; }
+.int-status.active { background: #064e3b; color: var(--green); }
+.int-status.inactive { background: #1f2937; color: var(--muted); }
+.cmd-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.cmd-item { background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; }
+.cmd-name { color: var(--accent); font-size: 11px; font-weight: 600; }
+.cmd-desc { color: var(--muted); font-size: 10px; margin-top: 2px; }
+.settings-section-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin: 20px 0 12px; max-width: 1000px; }
 </style>
 </head>
 <body>
 
 <header>
-  <div class="logo">⬡ EXECUTION SYSTEM</div>
+  <div class="logo"><div class="logo-dot"></div>AUTONOMOUS SYSTEM</div>
   <div class="status-bar">
-    <div class="indicator"><div class="dot" id="dot-api"></div> API</div>
-    <div class="indicator"><div class="dot" id="dot-redis"></div> Redis</div>
-    <div class="indicator"><div class="dot" id="dot-db"></div> Postgres</div>
-    <div class="indicator"><div class="dot" id="dot-queue"></div> <span id="queue-count">0</span> queued</div>
-    <div class="indicator"><div class="dot" id="dot-active"></div> <span id="active-label">idle</span></div>
+    <div class="ind"><div class="dot" id="d-api"></div>API</div>
+    <div class="ind"><div class="dot" id="d-redis"></div>Redis</div>
+    <div class="ind"><div class="dot" id="d-db"></div>Postgres</div>
+    <div class="ind"><div class="dot" id="d-queue"></div><span id="q-count">0</span> i kø</div>
+    <div class="ind"><div class="dot" id="d-active"></div><span id="a-label">idle</span></div>
   </div>
-  <div class="ws-status" id="ws-status">● disconnected</div>
+  <div class="ws-tag" id="ws-tag">● ws</div>
 </header>
 
-<div class="grid">
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('monitor')">📊 Monitor</div>
+  <div class="tab" onclick="switchTab('chat')">💬 Chat</div>
+  <div class="tab" onclick="switchTab('settings')">⚙️ Indstillinger</div>
+</div>
 
-  <!-- Tasks panel -->
-  <div class="panel">
-    <div class="panel-header">
-      Tasks
-      <span class="count-badge" id="task-count">0</span>
+<!-- ═══════════ MONITOR TAB ═══════════ -->
+<div class="tab-content active" id="tab-monitor">
+  <div class="monitor-grid">
+
+    <div class="panel">
+      <div class="ph">Tasks <span class="cbadge" id="task-count">0</span></div>
+      <div class="pb" id="task-list"><div class="empty">Ingen tasks endnu</div></div>
     </div>
-    <div class="panel-body" id="task-list">
-      <div class="log-empty">Ingen tasks endnu</div>
+
+    <div class="panel log-container">
+      <div class="ph">
+        Activity Feed
+        <span style="font-size:9px;color:var(--muted);font-weight:400">
+          <span style="color:var(--blue)">■</span> tg-in &nbsp;
+          <span style="color:var(--purple)">■</span> tg-out &nbsp;
+          <span style="color:var(--accent)">■</span> system
+        </span>
+      </div>
+      <div class="pb" style="padding:6px 10px" id="activity-log"><div class="empty">Venter på aktivitet…</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="ph">Goals <span class="cbadge" id="goal-count">0</span></div>
+      <div class="pb" id="goal-list"><div class="empty">Ingen aktive goals</div></div>
+    </div>
+
+    <div class="panel ss-panel">
+      <div class="ph">Browser</div>
+      <div class="pb" style="padding:0;height:100%">
+        <div class="ss-empty" id="ss-empty">Ingen aktiv browser session</div>
+        <img id="ss-img" class="ss-img" style="display:none" />
+      </div>
+    </div>
+
+    <div class="panel health-panel">
+      <div class="ph">System</div>
+      <div class="pb">
+        <div class="hrow"><span class="hlabel">Queue</span><span class="hval" id="h-q">—</span></div>
+        <div class="hrow"><span class="hlabel">Aktiv task</span><span class="hval" id="h-a">—</span></div>
+        <div class="hrow"><span class="hlabel">Aktive goals</span><span class="hval" id="h-g">—</span></div>
+        <div class="hrow"><span class="hlabel">Opdateret</span><span class="hval" id="h-ts">—</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════ CHAT TAB ═══════════ -->
+<div class="tab-content" id="tab-chat">
+  <div class="chat-layout">
+    <div class="chat-tools">
+      <button class="tool-btn" onclick="insertTool('søg')">🔍 Søg</button>
+      <button class="tool-btn" onclick="insertTool('læs email')">📧 Email</button>
+      <button class="tool-btn" onclick="insertTool('vis filer')">📁 Filer</button>
+      <button class="tool-btn" onclick="insertTool('kør task: ')">🤖 Agent</button>
+      <button class="tool-btn" onclick="clearChat()">🗑 Ryd</button>
+    </div>
+    <div class="chat-messages" id="chat-messages">
+      <div class="msg bot">
+        <div class="msg-bubble">Hej! Jeg er din AI-assistent. Jeg kan søge på nettet, læse emails, håndtere filer og køre browser-opgaver for dig.<br><br>Hvad skal jeg hjælpe med?</div>
+        <div class="msg-time">Nu</div>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <textarea class="chat-input" id="chat-input" placeholder="Skriv en besked… (Enter sender, Shift+Enter ny linje)" rows="1"></textarea>
+      <button class="send-btn" id="send-btn" onclick="sendChat()">Send</button>
     </div>
   </div>
+</div>
 
-  <!-- Live log -->
-  <div class="panel log-container">
-    <div class="panel-header">
-      Activity Feed
-      <span id="selected-task" style="color:#4b5563;font-weight:400;font-size:10px">
-        <span style="color:#38bdf8">■</span> tg-in &nbsp;
-        <span style="color:#a78bfa">■</span> tg-out &nbsp;
-        <span style="color:#7c3aed">■</span> system
-      </span>
+<!-- ═══════════ SETTINGS TAB ═══════════ -->
+<div class="tab-content" id="tab-settings">
+  <div class="settings-layout">
+
+    <div class="settings-grid">
+
+      <div class="settings-card">
+        <div class="sc-title">🤖 AI Model</div>
+        <div class="sc-row">
+          <span class="sc-label">API nøgle</span>
+          <span class="sc-val" id="s-apikey">Tjekker…</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Model</span>
+          <span class="sc-val" id="s-model">—</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Skift model</span>
+          <div style="display:flex;gap:6px">
+            <input class="sc-input" id="model-input" placeholder="grok-3" style="width:120px">
+            <button class="sc-btn" onclick="saveModel()">Gem</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="sc-title">🔐 Sikkerhed</div>
+        <div class="sc-row">
+          <span class="sc-label">Vault kryptering</span>
+          <span class="sc-val" id="s-vault">—</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Telegram bot</span>
+          <span class="sc-val" id="s-tg">—</span>
+        </div>
+        <div class="sc-row" style="flex-direction:column;align-items:flex-start;gap:8px;padding:10px 0">
+          <span class="sc-label" style="font-size:11px;color:var(--muted)">Sæt VAULT_MASTER_KEY og TELEGRAM_BOT_TOKEN i Railway Variables for fuld sikkerhed.</span>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="sc-title">⏱ Agent Indstillinger</div>
+        <div class="sc-row">
+          <span class="sc-label">Screenshot interval</span>
+          <span class="sc-val" id="s-interval">—</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Max trin per task</span>
+          <span class="sc-val" id="s-steps">—</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Skift interval (sek)</span>
+          <div style="display:flex;gap:6px">
+            <input class="sc-input" id="interval-input" placeholder="120" style="width:80px">
+            <button class="sc-btn" onclick="saveInterval()">Gem</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="sc-title">🗄 Database</div>
+        <div class="sc-row">
+          <span class="sc-label">Postgres</span>
+          <span class="sc-val" id="s-db">—</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Redis</span>
+          <span class="sc-val ok">✓ Forbundet</span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-label">Sæt DATABASE_URL i Railway for persistent storage.</span>
+        </div>
+      </div>
+
     </div>
-    <div class="panel-body log-body" id="log-list">
-      <div class="log-empty">Venter på aktivitet…</div>
+
+    <div class="settings-section-title">🔌 Integrationer</div>
+    <div style="max-width:1000px">
+
+      <div class="integration">
+        <div>
+          <div class="int-name">📧 Email (IMAP/SMTP)</div>
+          <div class="int-desc">Læs og send emails. Sæt EMAIL_HOST + EMAIL_USER + EMAIL_PASSWORD i Railway Variables.</div>
+        </div>
+        <div class="int-status" id="int-email">Tjekker…</div>
+      </div>
+
+      <div class="integration">
+        <div>
+          <div class="int-name">🌐 Browser Automation (Playwright)</div>
+          <div class="int-desc">Autonom navigation, login, scraping. Inkluderet i API servicen.</div>
+        </div>
+        <div class="int-status active">✓ Aktiv</div>
+      </div>
+
+      <div class="integration">
+        <div>
+          <div class="int-name">🔍 Web Søgning (DuckDuckGo)</div>
+          <div class="int-desc">Realtids web-søgning. Ingen API nøgle nødvendig.</div>
+        </div>
+        <div class="int-status active">✓ Aktiv</div>
+      </div>
+
+      <div class="integration">
+        <div>
+          <div class="int-name">📁 Fil System</div>
+          <div class="int-desc">Læs/skriv filer i sandbox (/tmp/agent-files). Altid aktiv.</div>
+        </div>
+        <div class="int-status active">✓ Aktiv</div>
+      </div>
+
+      <div class="integration">
+        <div>
+          <div class="int-name">🧠 Hukommelse (Brain + Vault)</div>
+          <div class="int-desc">Permanent AI-hukommelse og krypteret hemmeligheds-opbevaring via Redis.</div>
+        </div>
+        <div class="int-status" id="int-vault">Tjekker…</div>
+      </div>
+
     </div>
+
+    <div class="settings-section-title">📋 Telegram Kommandoer</div>
+    <div class="cmd-grid" style="max-width:1000px">
+      <div class="cmd-item"><div class="cmd-name">/stop</div><div class="cmd-desc">Stop aktiv agent</div></div>
+      <div class="cmd-item"><div class="cmd-name">/status &lt;id&gt;</div><div class="cmd-desc">Task status + logs</div></div>
+      <div class="cmd-item"><div class="cmd-name">/vault save &lt;nøgle&gt; &lt;værdi&gt;</div><div class="cmd-desc">Gem krypteret credential</div></div>
+      <div class="cmd-item"><div class="cmd-name">/vault get &lt;nøgle&gt;</div><div class="cmd-desc">Hent credential (slettes om 30s)</div></div>
+      <div class="cmd-item"><div class="cmd-name">/remember nøgle=værdi</div><div class="cmd-desc">Gem permanent fact</div></div>
+      <div class="cmd-item"><div class="cmd-name">/brain</div><div class="cmd-desc">Vis al AI-hukommelse</div></div>
+      <div class="cmd-item"><div class="cmd-name">/goals</div><div class="cmd-desc">Aktive mål</div></div>
+      <div class="cmd-item"><div class="cmd-name">/health</div><div class="cmd-desc">System status</div></div>
+    </div>
+
   </div>
-
-  <!-- Goals panel -->
-  <div class="panel">
-    <div class="panel-header">
-      Goals
-      <span class="count-badge" id="goal-count">0</span>
-    </div>
-    <div class="panel-body" id="goal-list">
-      <div class="log-empty">Ingen aktive goals</div>
-    </div>
-  </div>
-
-  <!-- Screenshot -->
-  <div class="panel screenshot-panel">
-    <div class="panel-header">Browser Screenshot</div>
-    <div class="panel-body" style="padding:0">
-      <div class="screenshot-empty" id="screenshot-empty">Ingen aktiv browser session</div>
-      <img id="screenshot-img" class="screenshot-img" style="display:none" />
-    </div>
-  </div>
-
-  <!-- Health -->
-  <div class="panel health-panel">
-    <div class="panel-header">System Health</div>
-    <div class="panel-body">
-      <div class="health-item"><span class="health-label">Queue</span><span class="health-val" id="h-queue">—</span></div>
-      <div class="health-item"><span class="health-label">Active task</span><span class="health-val" id="h-active">—</span></div>
-      <div class="health-item"><span class="health-label">Active goals</span><span class="health-val" id="h-goals">—</span></div>
-      <div class="health-item"><span class="health-label">Last update</span><span class="health-val" id="h-ts">—</span></div>
-    </div>
-  </div>
-
 </div>
 
 <script>
-  const API = window.location.origin;
-  let selectedTaskId = null;
-  let ws = null;
-  let tasks = [];
-  let goals = [];
+const API = window.location.origin;
+let ws = null;
+let tasks = [], goals = [];
+let selectedTask = null;
+let chatSession = 'web-' + Date.now();
 
-  // ── WebSocket ──────────────────────────────────────────────
-  function connectWS() {
-    const wsUrl = API.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/dashboard';
-    ws = new WebSocket(wsUrl);
+// ── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['monitor','chat','settings'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'chat') document.getElementById('chat-input').focus();
+  if (name === 'settings') loadSettings();
+}
 
-    ws.onopen = () => {
-      document.getElementById('ws-status').textContent = '● connected';
-      document.getElementById('ws-status').className = 'ws-status connected';
-    };
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function connectWS() {
+  const wsUrl = API.replace('https://','wss://').replace('http://','ws://') + '/ws/dashboard';
+  ws = new WebSocket(wsUrl);
+  ws.onopen = () => {
+    const t = document.getElementById('ws-tag');
+    t.textContent = '● ws'; t.className = 'ws-tag ok';
+  };
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'task_update') { refreshTasks(); appendActivity(`[TASK] ${msg.task_id} → ${msg.status}`, 'sys'); }
+    if (msg.type === 'health') updateHealth(msg);
+    if (msg.type === 'telegram_in') appendActivity(msg.text, 'tg-in');
+    if (msg.type === 'telegram_out') appendActivity(msg.text, 'tg-out');
+    if (msg.type === 'screenshot') showScreenshot(msg.url);
+  };
+  ws.onclose = () => {
+    const t = document.getElementById('ws-tag');
+    t.textContent = '● ws'; t.className = 'ws-tag';
+    setTimeout(connectWS, 4000);
+  };
+}
 
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'task_update') { refreshTasks(); appendActivity(`[TASK] ${msg.task_id} → ${msg.status}`, 'system'); }
-      if (msg.type === 'log') appendLog(msg);
-      if (msg.type === 'screenshot') showScreenshot(msg.url);
-      if (msg.type === 'health') updateHealth(msg);
-      if (msg.type === 'telegram_in') appendActivity(msg.text, 'telegram-in');
-      if (msg.type === 'telegram_out') appendActivity(msg.text, 'telegram-out');
-    };
+// ── Polling ────────────────────────────────────────────────────────────────
+async function poll() {
+  await Promise.all([refreshTasks(), refreshGoals(), refreshHealth()]);
+}
 
-    ws.onclose = () => {
-      document.getElementById('ws-status').textContent = '● disconnected';
-      document.getElementById('ws-status').className = 'ws-status';
-      setTimeout(connectWS, 3000);
-    };
-  }
-
-  // ── Polling fallback ───────────────────────────────────────
-  async function poll() {
-    await refreshTasks();
-    await refreshGoals();
-    await refreshHealth();
-    if (selectedTaskId) await refreshLogs(selectedTaskId);
-  }
-
-  async function refreshTasks() {
-    try {
-      const r = await fetch(API + '/tasks');
-      tasks = await r.json();
-      renderTasks();
-    } catch(e) {
-      setDot('dot-api', 'red');
-    }
-  }
-
-  async function refreshGoals() {
-    try {
-      const r = await fetch(API + '/goals?status=active');
-      goals = await r.json();
-      renderGoals();
-    } catch(e) {}
-  }
-
-  async function refreshHealth() {
-    try {
-      const r = await fetch(API + '/health');
-      const h = await r.json();
-      updateHealth(h);
-      setDot('dot-api', 'green');
-    } catch(e) {
-      setDot('dot-api', 'red');
-    }
-  }
-
-  async function refreshLogs(taskId) {
-    try {
-      const r = await fetch(API + '/tasks/' + taskId);
-      const task = await r.json();
-      renderLogs(task.logs || []);
-    } catch(e) {}
-  }
-
-  // ── Render ─────────────────────────────────────────────────
-  function renderTasks() {
-    const el = document.getElementById('task-list');
-    document.getElementById('task-count').textContent = tasks.length;
-
-    if (!tasks.length) {
-      el.innerHTML = '<div class="log-empty">Ingen tasks endnu</div>';
-      return;
-    }
-
-    el.innerHTML = tasks.slice(0, 30).map(t => `
-      <div class="task-item ${t.task_id === selectedTaskId ? 'active' : ''}"
-           onclick="selectTask('${t.task_id}')">
-        <div class="task-id">${t.task_id}</div>
-        <div class="task-desc">${(t.description || '').slice(0, 80)}${t.description?.length > 80 ? '…' : ''}</div>
-        <div class="task-meta">
-          <span class="badge badge-${t.status}">${t.status}</span>
-          ${t.retry_count > 0 ? `<span style="font-size:10px;color:#6b7280">retry ${t.retry_count}</span>` : ''}
-        </div>
-      </div>
-    `).join('');
-
-    // Update active indicator
-    const running = tasks.find(t => t.status === 'running');
-    const waiting = tasks.find(t => t.status === 'waiting_for_human');
-    if (running) {
-      setDot('dot-active', 'green');
-      document.getElementById('active-label').textContent = 'running';
-    } else if (waiting) {
-      setDot('dot-active', 'yellow');
-      document.getElementById('active-label').textContent = 'waiting';
-    } else {
-      setDot('dot-active', '');
-      document.getElementById('active-label').textContent = 'idle';
-    }
-
-    const queued = tasks.filter(t => t.status === 'queued').length;
-    document.getElementById('queue-count').textContent = queued;
-    setDot('dot-queue', queued > 0 ? 'yellow' : '');
-  }
-
-  function renderGoals() {
-    const el = document.getElementById('goal-list');
-    document.getElementById('goal-count').textContent = goals.length;
-
-    if (!goals.length) {
-      el.innerHTML = '<div class="log-empty">Ingen aktive goals</div>';
-      return;
-    }
-
-    el.innerHTML = goals.map(g => `
-      <div class="goal-item">
-        <div class="goal-id">${g.goal_id}</div>
-        <div class="goal-desc">${(g.description || '').slice(0, 100)}</div>
-        <div class="goal-meta">
-          <span class="priority">p${g.priority}</span>
-          ${g.recurring ? '<span class="recurring">↺ recurring</span>' : ''}
-          <span style="font-size:10px;color:#4b5563">runs: ${g.run_count || 0}</span>
-        </div>
-      </div>
-    `).join('');
-  }
-
-  function renderLogs(logs) {
-    const el = document.getElementById('log-list');
-    if (!logs.length) {
-      el.innerHTML = '<div class="log-empty">Ingen logs endnu</div>';
-      return;
-    }
-    el.innerHTML = logs.map((l, i) => {
-      const cls = l.includes('ERROR') ? 'error' : l.includes('complete') ? 'success' : l.includes('[SYS]') ? 'system' : '';
-      return `<div class="log-line ${cls} ${i === logs.length-1 ? 'new' : ''}">${escHtml(l)}</div>`;
-    }).join('');
-    el.scrollTop = el.scrollHeight;
-  }
-
-  function appendLog(msg) {
-    if (msg.task_id !== selectedTaskId) return;
-    const el = document.getElementById('log-list');
-    const line = document.createElement('div');
-    line.className = 'log-line new';
-    line.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('da')}</span>${escHtml(msg.message)}`;
-    el.appendChild(line);
-    el.scrollTop = el.scrollHeight;
-  }
-
-  function appendActivity(text, cls = '') {
-    const el = document.getElementById('log-list');
-    const empty = el.querySelector('.log-empty');
-    if (empty) empty.remove();
-    const line = document.createElement('div');
-    line.className = `log-line ${cls} new`;
-    line.innerHTML = `<span class="ts">${new Date().toLocaleTimeString('da')}</span>${escHtml(text)}`;
-    el.appendChild(line);
-    const all = el.querySelectorAll('.log-line');
-    if (all.length > 300) all[0].remove();
-    el.scrollTop = el.scrollHeight;
-  }
-
-  function updateHealth(h) {
-    document.getElementById('h-queue').textContent = h.queue_length ?? '—';
-    document.getElementById('h-queue').className = 'health-val ok';
-    document.getElementById('h-active').textContent = h.active_task || 'none';
-    document.getElementById('h-active').className = 'health-val ' + (h.active_task ? 'ok' : '');
-    document.getElementById('h-goals').textContent = h.active_goals ?? '—';
-    document.getElementById('h-ts').textContent = new Date().toLocaleTimeString('da');
-    setDot('dot-redis', 'green');
-    setDot('dot-db', 'green');
-  }
-
-  function showScreenshot(url) {
-    const img = document.getElementById('screenshot-img');
-    const empty = document.getElementById('screenshot-empty');
-    img.src = url + '?t=' + Date.now();
-    img.style.display = 'block';
-    empty.style.display = 'none';
-  }
-
-  function selectTask(id) {
-    selectedTaskId = id;
-    document.getElementById('selected-task').textContent = id;
+async function refreshTasks() {
+  try {
+    const r = await fetch(API + '/tasks');
+    tasks = await r.json();
     renderTasks();
-    refreshLogs(id);
+    dot('d-api','on');
+  } catch { dot('d-api','err'); }
+}
+
+async function refreshGoals() {
+  try {
+    const r = await fetch(API + '/goals?status=active');
+    goals = await r.json();
+    renderGoals();
+  } catch {}
+}
+
+async function refreshHealth() {
+  try {
+    const r = await fetch(API + '/health');
+    const h = await r.json();
+    updateHealth(h);
+  } catch {}
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderTasks() {
+  const el = document.getElementById('task-list');
+  document.getElementById('task-count').textContent = tasks.length;
+  if (!tasks.length) { el.innerHTML = '<div class="empty">Ingen tasks endnu</div>'; return; }
+  el.innerHTML = tasks.slice(0,30).map(t => `
+    <div class="task-item ${t.task_id === selectedTask ? 'sel' : ''}" onclick="selectTask('${t.task_id}')">
+      <div class="tid">${t.task_id}</div>
+      <div class="tdesc">${esc(t.description||'').slice(0,80)}${(t.description||'').length>80?'…':''}</div>
+      <div class="tmeta">
+        <span class="badge b-${t.status}">${t.status}</span>
+        ${t.retry_count>0?`<span style="font-size:9px;color:var(--muted)">↺${t.retry_count}</span>`:''}
+      </div>
+    </div>`).join('');
+  const running = tasks.find(t=>t.status==='running');
+  const waiting = tasks.find(t=>t.status==='waiting_for_human');
+  if (running) { dot('d-active','on'); document.getElementById('a-label').textContent='running'; }
+  else if (waiting) { dot('d-active','warn'); document.getElementById('a-label').textContent='waiting'; }
+  else { dot('d-active',''); document.getElementById('a-label').textContent='idle'; }
+  const q = tasks.filter(t=>t.status==='queued').length;
+  document.getElementById('q-count').textContent = q;
+  dot('d-queue', q>0?'warn':'');
+}
+
+function renderGoals() {
+  const el = document.getElementById('goal-list');
+  document.getElementById('goal-count').textContent = goals.length;
+  if (!goals.length) { el.innerHTML = '<div class="empty">Ingen aktive goals</div>'; return; }
+  el.innerHTML = goals.map(g => `
+    <div class="goal-item">
+      <div class="tid">${g.goal_id}</div>
+      <div class="gdesc">${esc(g.description||'').slice(0,100)}</div>
+      <div class="gmeta">
+        <span class="gprio">p${g.priority}</span>
+        ${g.recurring?'<span class="grec">↺</span>':''}
+        <span style="color:var(--muted)">runs:${g.run_count||0}</span>
+      </div>
+    </div>`).join('');
+}
+
+function updateHealth(h) {
+  document.getElementById('h-q').textContent = h.queue_length ?? '—';
+  document.getElementById('h-a').textContent = h.active_task || 'none';
+  document.getElementById('h-g').textContent = h.active_goals ?? '—';
+  document.getElementById('h-ts').textContent = new Date().toLocaleTimeString('da');
+  dot('d-redis','on'); dot('d-db','on');
+}
+
+function appendActivity(text, cls='') {
+  const el = document.getElementById('activity-log');
+  const empty = el.querySelector('.empty');
+  if (empty) empty.remove();
+  const line = document.createElement('div');
+  line.className = `log-line ${cls} fresh`;
+  line.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString('da')}</span>${esc(text)}`;
+  el.appendChild(line);
+  if (el.children.length > 300) el.children[0].remove();
+  el.scrollTop = el.scrollHeight;
+}
+
+function showScreenshot(url) {
+  const img = document.getElementById('ss-img');
+  img.src = url + '?t=' + Date.now();
+  img.style.display = 'block';
+  document.getElementById('ss-empty').style.display = 'none';
+}
+
+function selectTask(id) {
+  selectedTask = id; renderTasks();
+}
+
+function dot(id, state) {
+  const el = document.getElementById(id);
+  if (el) el.className = 'dot' + (state?' '+state:'');
+}
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Chat ───────────────────────────────────────────────────────────────────
+let chatBusy = false;
+
+function insertTool(text) {
+  const inp = document.getElementById('chat-input');
+  inp.value = text + ' ';
+  inp.focus();
+}
+
+async function clearChat() {
+  if (!confirm('Ryd chathistorik?')) return;
+  await fetch(API + '/chat/history?session_id=' + chatSession, {method:'DELETE'});
+  document.getElementById('chat-messages').innerHTML = `
+    <div class="msg bot">
+      <div class="msg-bubble">Chat ryddet. Hvad kan jeg hjælpe med?</div>
+      <div class="msg-time">${new Date().toLocaleTimeString('da')}</div>
+    </div>`;
+}
+
+async function sendChat() {
+  if (chatBusy) return;
+  const inp = document.getElementById('chat-input');
+  const msg = inp.value.trim();
+  if (!msg) return;
+
+  inp.value = '';
+  inp.style.height = 'auto';
+  chatBusy = true;
+  document.getElementById('send-btn').disabled = true;
+
+  addChatMsg(msg, 'user');
+
+  // Show typing indicator
+  const typingId = 'typing-' + Date.now();
+  const el = document.getElementById('chat-messages');
+  el.insertAdjacentHTML('beforeend', `
+    <div id="${typingId}" class="msg bot">
+      <div class="msg-bubble"><div class="typing">
+        <div class="typing-dots"><span></span><span></span><span></span></div>
+        Tænker…
+      </div></div>
+    </div>`);
+  el.scrollTop = el.scrollHeight;
+
+  try {
+    const r = await fetch(API + '/chat', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({message: msg, session_id: chatSession})
+    });
+    const data = await r.json();
+    document.getElementById(typingId)?.remove();
+
+    let reply = data.reply || 'Ingen svar.';
+    let extra = '';
+    if (data.action === 'task' && data.task_id) {
+      extra = `\n\n🤖 *Task startet:* \`${data.task_id}\``;
+      appendActivity(`[TASK] ${data.task_id} oprettet fra web-chat`, 'sys');
+    } else if (data.action === 'goal' && data.goal_id) {
+      extra = `\n\n🎯 *Goal oprettet:* \`${data.goal_id}\``;
+    }
+    addChatMsg(reply + extra, 'bot');
+  } catch (e) {
+    document.getElementById(typingId)?.remove();
+    addChatMsg(`Fejl: ${e.message}`, 'bot');
   }
 
-  function setDot(id, color) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.className = 'dot' + (color ? ' ' + color : '');
-  }
+  chatBusy = false;
+  document.getElementById('send-btn').disabled = false;
+  inp.focus();
+}
 
-  function escHtml(s) {
-    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
+function addChatMsg(text, role) {
+  const el = document.getElementById('chat-messages');
+  const time = new Date().toLocaleTimeString('da');
+  // Simple markdown: **bold**, `code`, ```block```
+  let html = esc(text)
+    .replace(/```([^`]+)```/g, '<pre>$1</pre>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+  el.insertAdjacentHTML('beforeend', `
+    <div class="msg ${role}">
+      <div class="msg-bubble">${html}</div>
+      <div class="msg-time">${time}</div>
+    </div>`);
+  el.scrollTop = el.scrollHeight;
+}
 
-  // ── Boot ──────────────────────────────────────────────────
-  poll();
-  setInterval(poll, 3000);
-  connectWS();
+// Enter key handler
+document.addEventListener('DOMContentLoaded', () => {
+  const inp = document.getElementById('chat-input');
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+  inp.addEventListener('input', () => {
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
+  });
+});
+
+// ── Settings ───────────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const r = await fetch(API + '/settings');
+    const s = await r.json();
+    document.getElementById('s-apikey').textContent = s.api_key_set ? '✓ Sat' : '✗ Mangler';
+    document.getElementById('s-apikey').className = 'sc-val ' + (s.api_key_set?'ok':'err');
+    document.getElementById('s-model').textContent = s.model;
+    document.getElementById('model-input').placeholder = s.model;
+    document.getElementById('s-vault').textContent = s.vault_configured ? '✓ Krypteret' : '⚠ Standard nøgle';
+    document.getElementById('s-vault').className = 'sc-val ' + (s.vault_configured?'ok':'warn');
+    document.getElementById('s-tg').textContent = s.telegram_configured ? '✓ Aktiv' : '✗ Mangler';
+    document.getElementById('s-tg').className = 'sc-val ' + (s.telegram_configured?'ok':'err');
+    document.getElementById('s-interval').textContent = s.progress_interval + 's';
+    document.getElementById('interval-input').placeholder = s.progress_interval;
+    document.getElementById('s-steps').textContent = s.max_task_steps;
+    document.getElementById('s-db').textContent = 'DATABASE_URL sat i env';
+    document.getElementById('int-email').textContent = s.email_configured ? '✓ Aktiv' : '✗ Ikke konfigureret';
+    document.getElementById('int-email').className = 'int-status ' + (s.email_configured?'active':'inactive');
+    document.getElementById('int-vault').textContent = s.vault_configured ? '✓ Aktiv' : '⚠ Svag kryptering';
+    document.getElementById('int-vault').className = 'int-status ' + (s.vault_configured?'active':'inactive');
+  } catch (e) { console.warn('Settings load failed:', e); }
+}
+
+async function saveModel() {
+  const val = document.getElementById('model-input').value.trim();
+  if (!val) return;
+  await fetch(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({model: val})});
+  await loadSettings();
+}
+
+async function saveInterval() {
+  const val = parseInt(document.getElementById('interval-input').value);
+  if (!val) return;
+  await fetch(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({progress_interval: val})});
+  await loadSettings();
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+poll();
+setInterval(poll, 4000);
+connectWS();
 </script>
 </body>
 </html>

@@ -1,11 +1,13 @@
 """
-Telegram Bot — Phase 2
-Operational control layer for the autonomous execution system.
+Telegram Bot — Autonomous Execution System
+Full-featured digital twin: AI chat, vault, brain, tasks, goals, screenshots.
 """
 import asyncio
 import json
 import logging
 import os
+import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +15,13 @@ import httpx
 import redis.asyncio as aioredis
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+
+# Make sure monorepo root is importable
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from core.ai.chat import chat as ai_chat
+from core.memory.brain import Brain
+from core.memory.vault import SecureVault
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -23,6 +32,8 @@ API_URL = os.getenv("API_URL", "http://api:8000")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
 redis_client: aioredis.Redis = None
+vault: SecureVault = None
+brain: Brain = None
 
 
 async def _ws_event(event_type: str, text: str, task_id: str = None):
@@ -56,33 +67,49 @@ async def api_post(path: str, body: dict) -> dict:
         return resp.json()
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+async def _send_photo_or_text(bot, chat_id: int, photo_path: str, caption: str):
+    """Send photo if it exists, else fall back to text."""
+    if photo_path and Path(photo_path).exists():
+        try:
+            with open(photo_path, "rb") as f:
+                await bot.send_photo(chat_id=chat_id, photo=InputFile(f),
+                                     caption=caption[:1024], parse_mode="Markdown")
+            return
+        except Exception as e:
+            log.warning("Photo send failed: %s", e)
+    await bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
+
+
+# ── Core commands ──────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     await update.message.reply_text(
-        "*Autonomous Execution System v2*\n\n"
-        "*Tasks (one-off)*\n"
-        "/task <desc> — queue task\n"
-        "/status <id> — task status\n"
-        "/tasks — list tasks\n"
-        "/reply <id> <msg> — respond to waiting task\n\n"
-        "*Goals (persistent)*\n"
-        "/goal <desc> — create goal\n"
-        "/goal_recurring <desc> — recurring goal\n"
-        "/goals — list active goals\n"
-        "/pause <goal_id> — pause goal\n"
-        "/resume <goal_id> — resume goal\n"
-        "/cancel <goal_id> — cancel goal\n\n"
-        "*Memory*\n"
-        "/context — show business context\n"
-        "/setcontext <json> — set business context\n"
-        "/lead <name|company|role> — save lead\n"
-        "/findleads <query> — search CRM\n\n"
+        "*Autonomous Execution System*\n\n"
+        "*Bare skriv til mig — AI forstår naturligt sprog.*\n\n"
+        "*Opgaver & Mål*\n"
+        "/task <desc> — kø en-gangs opgave\n"
+        "/goal <desc> — opret vedvarende mål\n"
+        "/goal_recurring <desc> — gentagende mål\n"
+        "/tasks — vis aktive opgaver\n"
+        "/goals — vis aktive mål\n"
+        "/status <id> — opgavestatus\n"
+        "/stop <id> — stop kørende opgave\n"
+        "/pause <id> / /resume <id> / /cancel <id>\n\n"
+        "*Vault (krypteret)*\n"
+        "/vault save <navn> <værdi> — gem credentials\n"
+        "/vault get <navn> — hent (slettes om 30s)\n"
+        "/vault list — vis nøgler\n"
+        "/vault del <navn> — slet\n\n"
+        "*Hukommelse*\n"
+        "/remember <nøgle>=<værdi> — husk noget\n"
+        "/recall <nøgle> — husk\n"
+        "/brain — vis alt jeg ved om dig\n"
+        "/forget <nøgle> — glem\n\n"
         "*System*\n"
-        "/health — system status\n"
-        "/help — this message",
+        "/health — systemstatus\n"
+        "/help — denne besked",
         parse_mode="Markdown",
     )
 
@@ -96,11 +123,13 @@ async def cmd_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         data = await api_post("/tasks", {"description": description})
+        await _ws_event("telegram_out", f"Task queued: {description[:80]}", data["task_id"])
         await update.message.reply_text(
-            f"Task queued.\nID: `{data['task_id']}`", parse_mode="Markdown"
+            f"Task i kø.\nID: `{data['task_id']}`\nFølg med: /status {data['task_id']}",
+            parse_mode="Markdown"
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -111,15 +140,14 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         task = await api_get(f"/tasks/{ctx.args[0]}")
-        status = task.get("status", "?")
-        logs = task.get("logs", [])[-4:]
-        log_text = "\n".join(logs) or "No logs"
+        logs = task.get("logs", [])[-5:]
+        log_text = "\n".join(logs) or "Ingen logs"
         await update.message.reply_text(
-            f"*{ctx.args[0]}*\nStatus: `{status}`\n\n```\n{log_text}\n```",
+            f"*{ctx.args[0]}*\nStatus: `{task.get('status', '?')}`\n\n```\n{log_text}\n```",
             parse_mode="Markdown",
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -128,7 +156,7 @@ async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         tasks = await api_get("/tasks")
         if not tasks:
-            await update.message.reply_text("No tasks.")
+            await update.message.reply_text("Ingen opgaver.")
             return
         lines = [
             f"• `{t['task_id']}` [{t.get('status','?')}] {t.get('description','')[:40]}"
@@ -136,7 +164,22 @@ async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /stop <task_id>")
+        return
+    task_id = ctx.args[0]
+    try:
+        await api_post(f"/tasks/{task_id}/stop", {})
+        await redis_client.set(f"task:stop:{task_id}", "1", ex=3600)
+        await update.message.reply_text(f"Stop-signal sendt til `{task_id}`.", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -149,9 +192,9 @@ async def cmd_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     message = " ".join(ctx.args[1:])
     try:
         await api_post("/tasks/human-reply", {"task_id": task_id, "message": message})
-        await update.message.reply_text(f"Reply sent to `{task_id}`.", parse_mode="Markdown")
+        await update.message.reply_text(f"Svar sendt til `{task_id}`.", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -164,11 +207,11 @@ async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         data = await api_post("/goals", {"description": description, "priority": "normal", "recurring": False})
         await update.message.reply_text(
-            f"Goal created.\nID: `{data['goal_id']}`\n{description[:60]}",
+            f"Mål oprettet.\nID: `{data['goal_id']}`\n{description[:60]}",
             parse_mode="Markdown",
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_goal_recurring(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -181,11 +224,11 @@ async def cmd_goal_recurring(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         data = await api_post("/goals", {"description": description, "priority": "normal", "recurring": True})
         await update.message.reply_text(
-            f"Recurring goal created.\nID: `{data['goal_id']}`\n{description[:60]}",
+            f"Gentagende mål oprettet.\nID: `{data['goal_id']}`\n{description[:60]}",
             parse_mode="Markdown",
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_goals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -194,15 +237,15 @@ async def cmd_goals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         goals = await api_get("/goals?status=active")
         if not goals:
-            await update.message.reply_text("No active goals.")
+            await update.message.reply_text("Ingen aktive mål.")
             return
         lines = [
-            f"• `{g['goal_id']}` [p{g.get('priority',3)}{'↺' if g.get('recurring') else ''}] {g.get('description','')[:50]}"
+            f"• `{g['goal_id']}` [{'↺' if g.get('recurring') else '→'}] {g.get('description','')[:50]}"
             for g in goals[:10]
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -213,9 +256,9 @@ async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await api_post(f"/goals/{ctx.args[0]}/pause", {})
-        await update.message.reply_text(f"`{ctx.args[0]}` paused.", parse_mode="Markdown")
+        await update.message.reply_text(f"`{ctx.args[0]}` sat på pause.", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -226,9 +269,9 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await api_post(f"/goals/{ctx.args[0]}/resume", {})
-        await update.message.reply_text(f"`{ctx.args[0]}` resumed.", parse_mode="Markdown")
+        await update.message.reply_text(f"`{ctx.args[0]}` genoptaget.", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -238,14 +281,12 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /cancel <goal_id>")
         return
     try:
-        import httpx as _httpx
-        async with _httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.delete(f"{API_URL}/goals/{ctx.args[0]}")
             resp.raise_for_status()
-        await _ws_event("telegram_out", f"Goal cancelled: {ctx.args[0]}")
-        await update.message.reply_text(f"`{ctx.args[0]}` cancelled.", parse_mode="Markdown")
+        await update.message.reply_text(f"`{ctx.args[0]}` annulleret.", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -254,48 +295,130 @@ async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         h = await api_get("/health")
         await update.message.reply_text(
-            f"*System Status*\n"
-            f"Queue: {h.get('queue_length', 0)} waiting\n"
-            f"Active task: `{h.get('active_task') or 'none'}`\n"
-            f"Active goals: {h.get('active_goals', 0)}",
+            f"*Systemstatus*\n"
+            f"Kø: {h.get('queue_length', 0)} ventende\n"
+            f"Aktiv opgave: `{h.get('active_task') or 'ingen'}`\n"
+            f"Aktive mål: {h.get('active_goals', 0)}",
             parse_mode="Markdown",
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
-async def cmd_context(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── Vault commands ─────────────────────────────────────────────────────────────
+
+async def cmd_vault(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
-    try:
-        data = await api_get("/memory/business_context")
+    if not ctx.args:
         await update.message.reply_text(
-            f"Business context:\n```\n{json.dumps(data.get('value', {}), indent=2)}\n```",
-            parse_mode="Markdown",
+            "*Vault kommandoer:*\n"
+            "/vault save <navn> <værdi>\n"
+            "/vault get <navn>\n"
+            "/vault list\n"
+            "/vault del <navn>",
+            parse_mode="Markdown"
         )
-    except Exception as e:
-        await update.message.reply_text(f"No context set. Use /setcontext {{json}}")
+        return
+
+    sub = ctx.args[0].lower()
+
+    if sub == "save" and len(ctx.args) >= 3:
+        name = ctx.args[1]
+        value = " ".join(ctx.args[2:])
+        await vault.save(name, value)
+        await update.message.reply_text(f"Gemt i vault: `{name}`", parse_mode="Markdown")
+
+    elif sub == "get" and len(ctx.args) >= 2:
+        name = ctx.args[1]
+        value = await vault.get(name)
+        if value is None:
+            await update.message.reply_text(f"Ingen vault-nøgle: `{name}`", parse_mode="Markdown")
+            return
+        msg = await update.message.reply_text(
+            f"*{name}:*\n`{value}`\n\n_(slettes om 30 sekunder)_",
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(30)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+    elif sub == "list":
+        keys = await vault.list_keys()
+        if not keys:
+            await update.message.reply_text("Vault er tom.")
+        else:
+            await update.message.reply_text("*Vault nøgler:*\n" + "\n".join(f"• `{k}`" for k in keys),
+                                             parse_mode="Markdown")
+
+    elif sub == "del" and len(ctx.args) >= 2:
+        name = ctx.args[1]
+        await vault.delete(name)
+        await update.message.reply_text(f"Slettet fra vault: `{name}`", parse_mode="Markdown")
+
+    else:
+        await update.message.reply_text("Ukendt vault-kommando. Brug /vault for hjælp.")
 
 
-async def cmd_setcontext(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── Brain commands ─────────────────────────────────────────────────────────────
+
+async def cmd_remember(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     raw = " ".join(ctx.args)
-    try:
-        data = json.loads(raw)
-        await api_post("/memory/business-context", data)
-        await update.message.reply_text("Business context saved.")
-    except json.JSONDecodeError:
-        await update.message.reply_text("Invalid JSON. Example:\n`/setcontext {\"company_name\": \"Acme\", \"industry\": \"SaaS\"}`", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    if "=" not in raw:
+        await update.message.reply_text("Usage: /remember nøgle=værdi")
+        return
+    key, _, value = raw.partition("=")
+    await brain.remember(key.strip(), value.strip())
+    await update.message.reply_text(f"Husket: `{key.strip()}` = {value.strip()}", parse_mode="Markdown")
 
+
+async def cmd_recall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /recall <nøgle>")
+        return
+    key = " ".join(ctx.args)
+    value = await brain.recall(key)
+    if value is None:
+        await update.message.reply_text(f"Ingen hukommelse om `{key}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"`{key}` = {value}", parse_mode="Markdown")
+
+
+async def cmd_brain(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    facts = await brain.all_facts()
+    if not facts:
+        await update.message.reply_text("Ingen facts endnu. Brug /remember nøgle=værdi")
+        return
+    lines = [f"• *{k}*: {v}" for k, v in facts.items()]
+    await update.message.reply_text("*Alt jeg ved om dig:*\n" + "\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /forget <nøgle>")
+        return
+    key = " ".join(ctx.args)
+    await redis_client.hdel("brain:facts", key)
+    await update.message.reply_text(f"Glemt: `{key}`", parse_mode="Markdown")
+
+
+# ── CRM commands ───────────────────────────────────────────────────────────────
 
 async def cmd_lead(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     if not ctx.args:
-        await update.message.reply_text("Usage: /lead Name|Company|Role")
+        await update.message.reply_text("Usage: /lead Navn|Firma|Rolle")
         return
     parts = " ".join(ctx.args).split("|")
     lead = {
@@ -305,9 +428,9 @@ async def cmd_lead(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     }
     try:
         await api_post("/leads", lead)
-        await update.message.reply_text(f"Lead saved: {lead['name']} @ {lead['company']}")
+        await update.message.reply_text(f"Lead gemt: {lead['name']} @ {lead['company']}")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
 
 async def cmd_findleads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -315,12 +438,12 @@ async def cmd_findleads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     query = " ".join(ctx.args)
     if not query:
-        await update.message.reply_text("Usage: /findleads <search query>")
+        await update.message.reply_text("Usage: /findleads <søgeforespørgsel>")
         return
     try:
         results = await api_get(f"/leads/search?q={query}&n=5")
         if not results:
-            await update.message.reply_text("No leads found.")
+            await update.message.reply_text("Ingen leads fundet.")
             return
         lines = []
         for r in results:
@@ -328,146 +451,96 @@ async def cmd_findleads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"• {m.get('name','?')} — {m.get('company','?')} ({m.get('role','?')})")
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"Fejl: {e}")
 
+
+# ── Free-text handler (full AI) ────────────────────────────────────────────────
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     text = update.message.text.strip()
+    chat_id = update.effective_chat.id
     await update.message.chat.send_action("typing")
     await _ws_event("telegram_in", f"User: {text}")
 
-    ai_response = await _ai_chat(text)
+    # Check if a browser task is waiting for a human reply
+    pending_key = "bot:pending_task"
+    pending_task_id = await redis_client.get(pending_key)
+    if pending_task_id:
+        await redis_client.delete(pending_key)
+        await redis_client.publish(
+            f"human_reply:{pending_task_id}",
+            json.dumps({"task_id": pending_task_id, "message": text})
+        )
+        await update.message.reply_text(
+            f"Svar sendt til opgave `{pending_task_id}`.",
+            parse_mode="Markdown"
+        )
+        return
 
-    if ai_response.get("type") == "task":
-        desc = ai_response.get("description", text)
+    # Load chat history from Redis
+    history_key = f"chat_history:{chat_id}"
+    try:
+        raw = await redis_client.get(history_key)
+        history = json.loads(raw) if raw else []
+    except Exception:
+        history = []
+
+    # Call the full AI engine with brain context
+    result = await ai_chat(text, history, brain=brain, max_tokens=2000)
+
+    # Persist history (last 20 messages, 7-day TTL)
+    try:
+        await redis_client.setex(history_key, 86400 * 7, json.dumps(history[-20:]))
+    except Exception:
+        pass
+
+    reply = result.get("reply", "Hvad kan jeg hjælpe med?")
+    action = result.get("action")
+
+    if action == "task":
+        desc = result.get("description", text)
         try:
             data = await api_post("/tasks", {"description": desc})
             task_id = data["task_id"]
             await _ws_event("telegram_out", f"Task queued: {desc[:80]}", task_id)
-            reply = (
-                f"{ai_response.get('reply', 'Opgave oprettet.')}\n\n"
+            full_reply = (
+                f"{reply}\n\n"
                 f"ID: `{task_id}`\n"
-                f"Følg med: /status {task_id}"
+                f"Følg med: /status {task_id} · Stop: /stop {task_id}"
             )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+            await update.message.reply_text(full_reply, parse_mode="Markdown")
         except Exception as e:
-            await update.message.reply_text(f"Kunne ikke oprette opgave: {e}")
+            await update.message.reply_text(f"{reply}\n\n(Fejl ved oprettelse: {e})")
 
-    elif ai_response.get("type") == "goal":
-        desc = ai_response.get("description", text)
-        recurring = ai_response.get("recurring", False)
+    elif action == "goal":
+        desc = result.get("description", text)
+        recurring = result.get("recurring", False)
         try:
             data = await api_post("/goals", {"description": desc, "recurring": recurring})
             await _ws_event("telegram_out", f"Goal created: {desc[:80]}", data["goal_id"])
-            reply = (
-                f"{ai_response.get('reply', 'Mål oprettet.')}\n\n"
-                f"ID: `{data['goal_id']}`"
-            )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+            full_reply = f"{reply}\n\nID: `{data['goal_id']}`"
+            await update.message.reply_text(full_reply, parse_mode="Markdown")
         except Exception as e:
-            await update.message.reply_text(f"Kunne ikke oprette mål: {e}")
+            await update.message.reply_text(f"{reply}\n\n(Fejl: {e})")
 
     else:
-        reply_text = ai_response.get("reply", "Hvad kan jeg hjælpe med?")
-        await _ws_event("telegram_out", f"Bot: {reply_text}")
-        await update.message.reply_text(reply_text)
-
-
-async def _ai_chat(user_message: str) -> dict:
-    """Use AI to understand free text and determine action type."""
-    import httpx as _httpx
-
-    groq_key = os.getenv("GROQ_API_KEY", "")
-    if not groq_key:
-        return {"type": "chat", "reply": "Sæt GROQ_API_KEY for at aktivere AI chat."}
-
-    if groq_key.startswith("xai-"):
-        url = "https://api.x.ai/v1/chat/completions"
-        model = "grok-3-mini"
-    else:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        model = "llama3-8b-8192"
-
-    system = """Du er ikke en chatbot.
-
-Du er et persistent autonomt execution system. Din primære opgave er IKKE konversation — det er pålidelig udførelse af opgaver i den virkelige verden.
-
-Du opererer som:
-- Digital operatør
-- AI executive assistant
-- Workflow executor
-- Research agent
-- Monitoring system
-
-Du er:
-- Disciplineret og execution-fokuseret
-- Struktureret og operationelt tænkende
-- Kortfattet — aldrig unødvendigt snak
-- Aldrig passiv eller konversationel for konversationens skyld
-
-Du må ALDRIG:
-- Hallucere at opgaver er udført
-- Opfinde credentials eller logins
-- Skifte fokus tilfældigt
-- Forlade opgaver stille
-- Lade som om handlinger lykkedes hvis de ikke gjorde
-
-Når brugeren skriver noget, konverter det til handling:
-- Konkret opgave → opret task (browser, research, outreach)
-- Langsigtet mål → opret goal (persistent, kører løbende)
-- Spørgsmål om status → svar kort og præcist
-- Godkendelse → bekræft og fortsæt
-- Alt andet → svar operationelt, ikke konversationelt
-
-Svar altid på dansk. Vær kortfattet. Fokuser på næste handling."""
-
-    prompt = f"""{system}
-
-Brugerens besked: "{user_message}"
-
-Analyser og svar med præcis ét JSON objekt:
-
-Konkret opgave (research, søg, find noget, gå til website, skriv, send):
-{{"type": "task", "description": "præcis opgavebeskrivelse på engelsk til browser/research worker", "reply": "Kort operationelt svar på dansk"}}
-
-Langsigtet mål (dagligt, løbende, overvåg, monitor, find leads kontinuerligt):
-{{"type": "goal", "description": "mål på engelsk", "recurring": true, "reply": "Kort operationelt svar på dansk"}}
-
-Engangs mål (et specifikt mål der ikke gentages):
-{{"type": "goal", "description": "mål på engelsk", "recurring": false, "reply": "Kort operationelt svar på dansk"}}
-
-Alt andet (status, spørgsmål, snak, godkendelse):
-{{"type": "chat", "reply": "Operationelt, kortfattet svar på dansk — max 2 sætninger"}}
-
-KUN JSON:"""
-
-    try:
-        async with _httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 200},
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0:
-                return json.loads(content[start:end])
-    except Exception as e:
-        log.error("AI chat error: %s", e)
-
-    return {"type": "chat", "reply": "Jeg forstod ikke helt. Prøv /task <opgave> eller /goal <mål>."}
+        await _ws_event("telegram_out", f"Bot: {reply[:200]}")
+        # Telegram Markdown is strict — send as plain text if it might have issues
+        try:
+            await update.message.reply_text(reply, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(reply)
 
 
 # ── Notification listener ─────────────────────────────────────────────────────
 
 async def listen_notifications(bot):
     pubsub = redis_client.pubsub()
-    await pubsub.subscribe("supervisor:notifications", "browser:screenshots")
+    await pubsub.subscribe("supervisor:notifications", "browser:screenshots", "browser:progress")
     log.info("Notification listener started")
+
     async for message in pubsub.listen():
         if message["type"] != "message":
             continue
@@ -479,33 +552,37 @@ async def listen_notifications(bot):
                 msg_text = data["message"]
                 await bot.send_message(
                     chat_id=ALLOWED_CHAT_ID,
-                    text=f"[SYS] `{data['task_id']}`\n{msg_text}",
+                    text=f"[SYS] `{data.get('task_id','?')}`\n{msg_text}",
                     parse_mode="Markdown",
                 )
-                await _ws_event("telegram_out", f"[SYS] {msg_text[:150]}", data.get("task_id"))
 
             elif channel == "browser:screenshots":
                 task_id = data["task_id"]
-                reason = data.get("reason", "Action required")
+                reason = data.get("reason", "Kræver handling")
                 screenshot_path = data.get("screenshot_path", "")
+                # Set pending task so user can just type the reply
+                await redis_client.setex("bot:pending_task", 300, task_id)
                 caption = (
-                    f"[BLOCKED] `{task_id}`\n{reason}\n\n"
-                    f"`/reply {task_id} <instruction>`"
+                    f"[BLOKKERET] `{task_id}`\n{reason}\n\n"
+                    f"_Skriv dit svar direkte — eller /reply {task_id} <besked>_"
                 )
-                if screenshot_path and Path(screenshot_path).exists():
-                    with open(screenshot_path, "rb") as f:
-                        await bot.send_photo(
-                            chat_id=ALLOWED_CHAT_ID,
-                            photo=InputFile(f),
-                            caption=caption,
-                            parse_mode="Markdown",
-                        )
-                else:
-                    await bot.send_message(
-                        chat_id=ALLOWED_CHAT_ID,
-                        text=caption,
-                        parse_mode="Markdown",
-                    )
+                await _send_photo_or_text(bot, ALLOWED_CHAT_ID, screenshot_path, caption)
+
+            elif channel == "browser:progress":
+                task_id = data.get("task_id", "?")
+                step = data.get("step", "?")
+                url = data.get("url", "")
+                logs = data.get("recent_logs", [])
+                screenshot_path = data.get("screenshot_path", "")
+                log_lines = "\n".join(f"  {l}" for l in logs[-3:]) if logs else "  Ingen logs"
+                caption = (
+                    f"*[PROGRESS] `{task_id}`*\n"
+                    f"Trin: {step} · {url[:50] if url else 'ingen URL'}\n\n"
+                    f"```\n{log_lines}\n```\n\n"
+                    f"_Stop med: /stop {task_id}_"
+                )
+                await _send_photo_or_text(bot, ALLOWED_CHAT_ID, screenshot_path, caption)
+
         except Exception as e:
             log.error("Notification error: %s", e)
 
@@ -513,19 +590,24 @@ async def listen_notifications(bot):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    global redis_client
+    global redis_client, vault, brain
+
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    vault = SecureVault(redis_client)
+    brain = Brain(redis_client)
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     handlers = [
         ("start", cmd_start), ("help", cmd_start),
         ("task", cmd_task), ("status", cmd_status),
-        ("tasks", cmd_tasks), ("reply", cmd_reply),
+        ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),
         ("goals", cmd_goals), ("pause", cmd_pause), ("resume", cmd_resume),
         ("cancel", cmd_cancel), ("health", cmd_health),
-        ("context", cmd_context), ("setcontext", cmd_setcontext),
+        ("vault", cmd_vault),
+        ("remember", cmd_remember), ("recall", cmd_recall),
+        ("brain", cmd_brain), ("forget", cmd_forget),
         ("lead", cmd_lead), ("findleads", cmd_findleads),
     ]
     for name, handler in handlers:
@@ -537,7 +619,7 @@ async def main():
     await app.updater.start_polling(drop_pending_updates=True)
     asyncio.create_task(listen_notifications(app.bot))
 
-    log.info("Telegram bot v2 started")
+    log.info("Telegram bot started — full AI + vault + brain enabled")
     await asyncio.Event().wait()
 
 
