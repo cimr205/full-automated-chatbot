@@ -13,6 +13,7 @@ import redis.asyncio as aioredis
 
 from .signal_engine import score_signal, MIN_CONFIDENCE
 from .position_manager import PositionManager
+from .mt5_bridge import MT5Bridge
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class MarketMonitor:
         self._running  = False
         self._last_signal: dict[str, dict] = {}
         self.positions = PositionManager(redis)
+        self.mt5       = MT5Bridge(redis)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -56,8 +58,8 @@ class MarketMonitor:
         self._running = True
         log.info("MarketMonitor started (interval=%ds, confidence≥%.0f%%)",
                  MONITOR_INTERVAL, CONFIDENCE_THRESH * 100)
-        # Start position monitor as concurrent task
         asyncio.create_task(self.positions.run())
+        asyncio.create_task(self.mt5.run())
         while self._running:
             try:
                 await self._scan_all()
@@ -136,7 +138,7 @@ class MarketMonitor:
         self._last_signal[symbol] = {"direction": direction, "ts": now}
         await self._publish(symbol, market, signal)
 
-        # Auto-open position and notify via Telegram
+        # Log position in Redis (always)
         trade_id = await self.positions.open_trade(
             symbol=symbol, market=market,
             direction=direction,
@@ -147,6 +149,25 @@ class MarketMonitor:
             signal_data=signal,
             source="auto",
         )
+
+        # Execute in MT5 if worker is online (optional — works without it)
+        try:
+            mt5_online = await self.mt5.ping()
+            if mt5_online:
+                mt5_result = await self.mt5.send_open(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    direction=direction,
+                    stop_loss=signal["stop_loss"],
+                    take_profit=signal["take_profit"],
+                )
+                if "error" in mt5_result:
+                    log.warning("MT5 execution failed: %s", mt5_result["error"])
+                else:
+                    log.info("MT5 order placed: ticket=%s", mt5_result.get("ticket"))
+        except Exception as e:
+            log.warning("MT5 execution error (non-fatal): %s", e)
+
         await self._notify_trade_open(trade_id, symbol, signal)
         await self._journal(symbol, market, signal, published=True)
         await self._increment_daily_count()
