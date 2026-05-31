@@ -135,6 +135,55 @@ header { display: flex; align-items: center; justify-content: space-between; pad
 .msg-bubble pre { background: #0a0a14; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; font-size: 12px; }
 .msg-bubble code { background: #0a0a14; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
 
+/* ── Trading tab ── */
+.trading-layout { flex: 1; overflow: hidden; display: grid; grid-template-columns: 340px 1fr; grid-template-rows: 1fr; gap: 1px; background: var(--border); }
+.trading-left  { display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+.trading-right { display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+.trading-right-top    { flex: 1; overflow: hidden; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
+.trading-right-bottom { height: 220px; overflow: hidden; display: flex; flex-direction: column; flex-shrink: 0; }
+
+.trade-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 7px; position: relative; }
+.trade-card.long  { border-left: 3px solid var(--green); }
+.trade-card.short { border-left: 3px solid var(--red); }
+.trade-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+.trade-symbol { font-size: 13px; font-weight: 700; color: var(--text); }
+.trade-dir { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 3px; }
+.trade-dir.long  { background: #064e3b; color: #6ee7b7; }
+.trade-dir.short { background: #7f1d1d; color: #fca5a5; }
+.trade-levels { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-bottom: 5px; }
+.trade-level { text-align: center; }
+.trade-level-label { font-size: 9px; color: var(--muted); }
+.trade-level-val   { font-size: 11px; font-weight: 600; }
+.trade-level-val.entry { color: var(--blue); }
+.trade-level-val.sl    { color: var(--red); }
+.trade-level-val.tp    { color: var(--green); }
+.trade-meta { display: flex; gap: 8px; font-size: 10px; color: var(--muted); align-items: center; }
+.trade-src  { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: var(--border); }
+.trade-rr   { color: var(--yellow); font-weight: 600; }
+.trade-close-btn { position: absolute; top: 8px; right: 10px; background: #1f1030; border: 1px solid var(--border); color: var(--muted); font-size: 9px; padding: 2px 7px; border-radius: 3px; cursor: pointer; }
+.trade-close-btn:hover { border-color: var(--red); color: var(--red); }
+
+.signal-card { padding: 9px 11px; border: 1px solid var(--border); border-radius: 5px; margin-bottom: 6px; }
+.signal-card.long  { border-left: 3px solid var(--green); }
+.signal-card.short { border-left: 3px solid var(--red); }
+.signal-top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.signal-sym { font-size: 12px; font-weight: 700; }
+.signal-conf { font-size: 10px; color: var(--yellow); font-weight: 700; }
+.signal-reasons { font-size: 10px; color: var(--muted); line-height: 1.5; }
+.signal-levels { display: flex; gap: 12px; font-size: 10px; margin-top: 4px; }
+
+.stats-row { display: flex; gap: 1px; background: var(--border); }
+.stat-box { flex: 1; background: var(--bg2); padding: 10px 14px; text-align: center; }
+.stat-val { font-size: 20px; font-weight: 700; margin-bottom: 2px; }
+.stat-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.stat-val.green { color: var(--green); }
+.stat-val.red   { color: var(--red); }
+.stat-val.yellow { color: var(--yellow); }
+
+.monitor-status { padding: 6px 12px; background: var(--bg2); border-bottom: 1px solid var(--border); font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.monitor-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
 /* ── Settings tab ── */
 .settings-layout { flex: 1; overflow-y: auto; padding: 24px; }
 .settings-layout::-webkit-scrollbar { width: 4px; }
@@ -182,6 +231,7 @@ header { display: flex; align-items: center; justify-content: space-between; pad
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab('monitor')">📊 Monitor</div>
+  <div class="tab" onclick="switchTab('trading')">📈 Trading</div>
   <div class="tab" onclick="switchTab('chat')">💬 Chat</div>
   <div class="tab" onclick="switchTab('settings')">⚙️ Indstillinger</div>
 </div>
@@ -227,6 +277,45 @@ header { display: flex; align-items: center; justify-content: space-between; pad
         <div class="hrow"><span class="hlabel">Aktiv task</span><span class="hval" id="h-a">—</span></div>
         <div class="hrow"><span class="hlabel">Aktive goals</span><span class="hval" id="h-g">—</span></div>
         <div class="hrow"><span class="hlabel">Opdateret</span><span class="hval" id="h-ts">—</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════ TRADING TAB ═══════════ -->
+<div class="tab-content" id="tab-trading">
+  <div class="trading-layout">
+
+    <!-- LEFT: open trades -->
+    <div class="trading-left">
+      <div class="ph">
+        Åbne Trades <span class="cbadge" id="trade-count">0</span>
+        <button onclick="refreshTrading()" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:9px;padding:2px 8px;border-radius:3px;cursor:pointer">↺ Opdater</button>
+      </div>
+      <div class="monitor-status">
+        <div class="monitor-dot"></div>
+        <span id="monitor-sess">Scanner markedet…</span>
+      </div>
+      <!-- Stats row -->
+      <div class="stats-row" id="stats-row">
+        <div class="stat-box"><div class="stat-val" id="s-winrate">—</div><div class="stat-label">Win Rate</div></div>
+        <div class="stat-box"><div class="stat-val" id="s-avgr">—</div><div class="stat-label">Gns R:R</div></div>
+        <div class="stat-box"><div class="stat-val" id="s-totalr">—</div><div class="stat-label">Total R</div></div>
+        <div class="stat-box"><div class="stat-val" id="s-trades">—</div><div class="stat-label">Trades</div></div>
+      </div>
+      <div class="pb" id="trade-list"><div class="empty">Ingen åbne trades</div></div>
+    </div>
+
+    <!-- RIGHT: signals + journal -->
+    <div class="trading-right">
+      <div class="trading-right-top">
+        <div class="ph">Seneste Signaler <span style="font-size:9px;font-weight:400;color:var(--muted)">kun dem der bestod alle 8 checklist-punkter</span></div>
+        <div class="pb" id="signal-list"><div class="empty">Ingen signaler endnu</div></div>
+      </div>
+      <div class="trading-right-bottom">
+        <div class="ph">Journal <span style="font-size:9px;font-weight:400;color:var(--muted)">alle scans — også afviste</span></div>
+        <div class="pb" id="journal-list"><div class="empty">Journal tom</div></div>
       </div>
     </div>
 
@@ -381,12 +470,16 @@ header { display: flex; align-items: center; justify-content: space-between; pad
     <div class="cmd-grid" style="max-width:1000px">
       <div class="cmd-item"><div class="cmd-name">/stop</div><div class="cmd-desc">Stop aktiv agent</div></div>
       <div class="cmd-item"><div class="cmd-name">/status &lt;id&gt;</div><div class="cmd-desc">Task status + logs</div></div>
+      <div class="cmd-item"><div class="cmd-name">/trades</div><div class="cmd-desc">Åbne trades + statistik</div></div>
+      <div class="cmd-item"><div class="cmd-name">/trade SYM long ENTRY sl=X tp=Y</div><div class="cmd-desc">Log trade manuelt</div></div>
+      <div class="cmd-item"><div class="cmd-name">/close &lt;id&gt;</div><div class="cmd-desc">Luk trade</div></div>
+      <div class="cmd-item"><div class="cmd-name">/why &lt;id&gt;</div><div class="cmd-desc">Grundlag for trade</div></div>
+      <div class="cmd-item"><div class="cmd-name">/market</div><div class="cmd-desc">Seneste handelssignaler</div></div>
+      <div class="cmd-item"><div class="cmd-name">/watchlist</div><div class="cmd-desc">Vis/ændr overvågningsliste</div></div>
+      <div class="cmd-item"><div class="cmd-name">/scan</div><div class="cmd-desc">Scan markedet NU</div></div>
       <div class="cmd-item"><div class="cmd-name">/vault save &lt;nøgle&gt; &lt;værdi&gt;</div><div class="cmd-desc">Gem krypteret credential</div></div>
-      <div class="cmd-item"><div class="cmd-name">/vault get &lt;nøgle&gt;</div><div class="cmd-desc">Hent credential (slettes om 30s)</div></div>
       <div class="cmd-item"><div class="cmd-name">/remember nøgle=værdi</div><div class="cmd-desc">Gem permanent fact</div></div>
       <div class="cmd-item"><div class="cmd-name">/brain</div><div class="cmd-desc">Vis al AI-hukommelse</div></div>
-      <div class="cmd-item"><div class="cmd-name">/goals</div><div class="cmd-desc">Aktive mål</div></div>
-      <div class="cmd-item"><div class="cmd-name">/health</div><div class="cmd-desc">System status</div></div>
     </div>
 
   </div>
@@ -402,13 +495,14 @@ let chatSession = 'web-' + Date.now();
 // ── Tab switching ──────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['monitor','chat','settings'];
+    const names = ['monitor','trading','chat','settings'];
     t.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'chat') document.getElementById('chat-input').focus();
   if (name === 'settings') loadSettings();
+  if (name === 'trading') refreshTrading();
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
@@ -426,6 +520,7 @@ function connectWS() {
     if (msg.type === 'telegram_in') appendActivity(msg.text, 'tg-in');
     if (msg.type === 'telegram_out') appendActivity(msg.text, 'tg-out');
     if (msg.type === 'screenshot') showScreenshot(msg.url);
+    if (msg.type === 'trading_signal') { refreshSignals(); appendActivity(`📈 Signal: ${msg.symbol} ${msg.direction} ${(msg.confidence*100).toFixed(0)}%`, 'ok'); }
   };
   ws.onclose = () => {
     const t = document.getElementById('ws-tag');
@@ -681,8 +776,161 @@ async function saveInterval() {
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
+// ── Trading ────────────────────────────────────────────────────────────────
+let openTrades = [], recentSignals = [], journalEntries = [];
+
+async function refreshTrading() {
+  await Promise.all([refreshTrades(), refreshSignals(), refreshJournal(), refreshTradingStats()]);
+}
+
+async function refreshTrades() {
+  try {
+    const r = await fetch(API + '/trading/trades');
+    openTrades = await r.json();
+    renderTrades();
+  } catch {}
+}
+
+async function refreshSignals() {
+  try {
+    const r = await fetch(API + '/trading/signals?limit=20');
+    recentSignals = await r.json();
+    renderSignals();
+  } catch {}
+}
+
+async function refreshJournal() {
+  try {
+    const r = await fetch(API + '/trading/journal?limit=30');
+    journalEntries = await r.json();
+    renderJournal();
+  } catch {}
+}
+
+async function refreshTradingStats() {
+  try {
+    const r = await fetch(API + '/trading/stats');
+    const s = await r.json();
+    const wr = document.getElementById('s-winrate');
+    const ar = document.getElementById('s-avgr');
+    const tr = document.getElementById('s-totalr');
+    const tc = document.getElementById('s-trades');
+    wr.textContent = s.total ? (s.win_rate*100).toFixed(0)+'%' : '—';
+    wr.className = 'stat-val ' + (s.win_rate >= 0.5 ? 'green' : s.win_rate > 0 ? 'yellow' : '');
+    ar.textContent = s.total ? s.avg_rr.toFixed(2)+'R' : '—';
+    ar.className = 'stat-val ' + (s.avg_rr > 0 ? 'green' : 'red');
+    tr.textContent = s.total ? (s.total_r > 0 ? '+' : '') + s.total_r.toFixed(1)+'R' : '—';
+    tr.className = 'stat-val ' + (s.total_r > 0 ? 'green' : s.total_r < 0 ? 'red' : '');
+    tc.textContent = s.total || '0';
+    tc.className = 'stat-val';
+  } catch {}
+}
+
+function fmtPrice(v) {
+  if (!v) return '—';
+  return Math.abs(v) < 10 ? v.toFixed(5) : v.toFixed(2);
+}
+
+function renderTrades() {
+  const el = document.getElementById('trade-list');
+  document.getElementById('trade-count').textContent = openTrades.length;
+  if (!openTrades.length) { el.innerHTML = '<div class="empty">Ingen åbne trades — systemet scanner markedet automatisk</div>'; return; }
+  el.innerHTML = openTrades.map(t => {
+    const dir = t.direction || 'long';
+    const src = t.source === 'auto' ? '🤖 Auto' : '👤 Manuel';
+    const rr  = t.reasoning && t.reasoning.rr_planned ? (t.reasoning.rr_planned.toFixed(1)+':1') : '—';
+    const setup = t.reasoning && t.reasoning.setup ? t.reasoning.setup : '';
+    const sess  = t.reasoning && t.reasoning.session ? t.reasoning.session : '';
+    const inds  = t.reasoning && t.reasoning.indicators ? t.reasoning.indicators.slice(0,2).join(' · ') : '';
+    return `<div class="trade-card ${dir}">
+      <div class="trade-header">
+        <span class="trade-symbol">${esc(t.symbol)}</span>
+        <span class="trade-dir ${dir}">${dir.toUpperCase()}</span>
+      </div>
+      <div class="trade-levels">
+        <div class="trade-level"><div class="trade-level-label">ENTRY</div><div class="trade-level-val entry">${fmtPrice(t.entry)}</div></div>
+        <div class="trade-level"><div class="trade-level-label">STOP</div><div class="trade-level-val sl">${fmtPrice(t.stop_loss)}</div></div>
+        <div class="trade-level"><div class="trade-level-label">TARGET</div><div class="trade-level-val tp">${fmtPrice(t.take_profit)}</div></div>
+      </div>
+      <div class="trade-meta">
+        <span class="trade-src">${src}</span>
+        <span class="trade-rr">R:R ${rr}</span>
+        ${setup ? `<span style="color:var(--accent)">${esc(setup)}</span>` : ''}
+        ${sess  ? `<span style="color:var(--muted)">${esc(sess)}</span>` : ''}
+      </div>
+      ${inds ? `<div style="font-size:9px;color:#374151;margin-top:4px">${esc(inds)}</div>` : ''}
+      <button class="trade-close-btn" onclick="closeTrade('${t.trade_id}', ${t.entry})">✕ Luk</button>
+    </div>`;
+  }).join('');
+}
+
+function renderSignals() {
+  const el = document.getElementById('signal-list');
+  if (!recentSignals.length) { el.innerHTML = '<div class="empty">Ingen signaler endnu. Næste scan om få minutter.</div>'; return; }
+  el.innerHTML = recentSignals.slice(0,15).map(s => {
+    const dir = s.direction || 'long';
+    const conf = s.confidence ? (s.confidence*100).toFixed(0)+'%' : '—';
+    const reasons = s.reasons ? s.reasons.slice(0,3).join(' · ') : '';
+    const ts = s.ts ? s.ts.slice(0,16).replace('T',' ') : '';
+    return `<div class="signal-card ${dir}">
+      <div class="signal-top">
+        <span class="signal-sym">${esc(s.symbol)} ${dir === 'long' ? '📈' : '📉'}</span>
+        <span class="signal-conf">${conf}</span>
+      </div>
+      ${s.setup_type ? `<div style="font-size:10px;color:var(--accent);margin-bottom:3px">${esc(s.setup_type)}</div>` : ''}
+      <div class="signal-reasons">${esc(reasons)}</div>
+      <div class="signal-levels">
+        <span>Entry <b>${fmtPrice(s.price)}</b></span>
+        <span style="color:var(--red)">SL ${fmtPrice(s.stop_loss)}</span>
+        <span style="color:var(--green)">TP ${fmtPrice(s.take_profit)}</span>
+        <span style="color:var(--muted)">${esc(s.session||'')}</span>
+        <span style="color:#374151">${ts}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderJournal() {
+  const el = document.getElementById('journal-list');
+  if (!journalEntries.length) { el.innerHTML = '<div class="empty">Journal tom</div>'; return; }
+  el.innerHTML = journalEntries.slice(0,20).map(e => {
+    const ok = e.checklist_ok;
+    const dir = e.direction || 'neutral';
+    const icon = ok ? '✅' : '❌';
+    const conf = e.confidence ? (e.confidence*100).toFixed(0)+'%' : '—';
+    const ts = e.ts ? e.ts.slice(11,16) : '';
+    const color = ok ? 'var(--green)' : 'var(--muted)';
+    return `<div style="display:flex;gap:8px;align-items:center;padding:4px 2px;border-bottom:1px solid #0d0d18;font-size:10px">
+      <span>${icon}</span>
+      <span style="color:${dir==='long'?'var(--green)':'var(--red)'};min-width:32px">${dir==='long'?'▲':'▼'}</span>
+      <span style="color:var(--text);min-width:80px">${esc(e.symbol||'')}</span>
+      <span style="color:var(--yellow)">${conf}</span>
+      <span style="color:var(--accent);flex:1">${esc(e.setup_type||'ingen setup')}</span>
+      <span style="color:#374151">${esc(e.session||'')}</span>
+      <span style="color:#374151">${ts}</span>
+    </div>`;
+  }).join('');
+
+  // Update monitor status line
+  const last = journalEntries[0];
+  if (last) {
+    document.getElementById('monitor-sess').textContent =
+      `Seneste scan: ${last.ts ? last.ts.slice(11,16) : '—'} · Session: ${last.session || 'ukendt'}`;
+  }
+}
+
+async function closeTrade(tradeId, currentPrice) {
+  const price = parseFloat(prompt(`Luk trade ${tradeId}\nAngiv exit-pris (eller tryk OK for at bruge entry-pris ${currentPrice}):`) || currentPrice);
+  if (!price) return;
+  try {
+    await fetch(API + `/trading/trades/${tradeId}/close?exit_price=${price}`, { method: 'POST' });
+    await refreshTrading();
+  } catch(e) { alert('Fejl: ' + e); }
+}
+
 poll();
 setInterval(poll, 4000);
+setInterval(refreshTrading, 60000);
 connectWS();
 </script>
 </body>
