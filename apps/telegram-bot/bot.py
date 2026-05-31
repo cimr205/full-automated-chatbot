@@ -87,6 +87,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Autonomous Execution System*\n\n"
         "*Bare skriv til mig — AI forstår naturligt sprog.*\n\n"
+        "*📊 Market Monitor*\n"
+        "/market — seneste handelssignaler\n"
+        "/watchlist — vis/sæt overvågningsliste\n"
+        "/scan — scan markedet NU\n\n"
         "*Opgaver & Mål*\n"
         "/task <desc> — kø en-gangs opgave\n"
         "/goal <desc> — opret vedvarende mål\n"
@@ -411,6 +415,85 @@ async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Glemt: `{key}`", parse_mode="Markdown")
 
 
+# ── Trading commands ──────────────────────────────────────────────────────────
+
+async def cmd_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        signals = await api_get("/trading/signals?limit=10")
+        if not signals:
+            await update.message.reply_text("Ingen signaler endnu. Monitoren scanner hvert 10. minut.")
+            return
+        lines = []
+        for s in signals[:8]:
+            d = "📈" if s.get("direction") == "long" else "📉"
+            conf = f"{s.get('confidence', 0):.0%}"
+            sym = s.get("symbol", "?")
+            price = s.get("price", 0)
+            ts = s.get("ts", "")[:16].replace("T", " ")
+            lines.append(f"{d} *{sym}* {conf} @ {price:.4g} _{ts}_")
+        await update.message.reply_text(
+            "*Seneste handelssignaler:*\n\n" + "\n".join(lines),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    # /watchlist → vis
+    # /watchlist forex EURUSD=X,GBPUSD=X
+    # /watchlist stocks SPY,QQQ,NVDA
+    if not ctx.args:
+        try:
+            cfg = await api_get("/trading/config")
+            forex  = ", ".join(cfg.get("forex", []))
+            stocks = ", ".join(cfg.get("stocks", []))
+            conf   = cfg.get("confidence", 0.68)
+            await update.message.reply_text(
+                f"*Overvågningsliste*\n\n"
+                f"💱 *Forex:*\n{forex}\n\n"
+                f"📊 *Aktier/Indeks:*\n{stocks}\n\n"
+                f"Confidence threshold: {conf:.0%}\n\n"
+                f"Brug `/watchlist forex EUR/USD=X,GBP/USD=X` for at ændre.",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Fejl: {e}")
+        return
+
+    market_type = ctx.args[0].lower()
+    if market_type not in ("forex", "stocks") or len(ctx.args) < 2:
+        await update.message.reply_text("Usage: /watchlist forex EURUSD=X,GBPUSD=X\neller: /watchlist stocks SPY,QQQ")
+        return
+    symbols = ctx.args[1].split(",")
+    try:
+        body = {market_type: [s.strip() for s in symbols]}
+        await api_post("/trading/config", body)
+        await update.message.reply_text(
+            f"✅ {market_type.capitalize()} watchlist opdateret:\n" + ", ".join(symbols),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        await api_post("/trading/scan-now", {})
+        await update.message.reply_text(
+            "🔍 Scanner markedet nu... Du får besked hvis der er et signal.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 # ── CRM commands ───────────────────────────────────────────────────────────────
 
 async def cmd_lead(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -524,11 +607,21 @@ async def listen_notifications(bot):
 
             if channel == "supervisor:notifications":
                 msg_text = data["message"]
-                await bot.send_message(
-                    chat_id=ALLOWED_CHAT_ID,
-                    text=f"[SYS] `{data.get('task_id','?')}`\n{msg_text}",
-                    parse_mode="Markdown",
-                )
+                task_id = data.get("task_id", "?")
+                parse_mode = data.get("parse_mode", "Markdown")
+                # Trading signals come with pre-formatted Markdown — send directly
+                if task_id.startswith("signal_"):
+                    await bot.send_message(
+                        chat_id=ALLOWED_CHAT_ID,
+                        text=msg_text,
+                        parse_mode=parse_mode,
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=ALLOWED_CHAT_ID,
+                        text=f"[SYS] `{task_id}`\n{msg_text}",
+                        parse_mode=parse_mode,
+                    )
 
             elif channel == "browser:screenshots":
                 task_id = data["task_id"]
@@ -574,6 +667,7 @@ async def main():
 
     handlers = [
         ("start", cmd_start), ("help", cmd_start),
+        ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),

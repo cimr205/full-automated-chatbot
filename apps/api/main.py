@@ -48,6 +48,7 @@ from core.memory.memory_manager import MemoryManager
 from core.goals.goal_engine import GoalEngine
 from core.memory.vault import SecureVault
 from core.memory.brain import Brain
+from core.trading.market_monitor import MarketMonitor, DEFAULT_FOREX, DEFAULT_STOCKS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -62,11 +63,12 @@ memory: MemoryManager = None
 goal_engine: GoalEngine = None
 vault: SecureVault = None
 brain: Brain = None
+market_monitor: MarketMonitor = None
 
 
 @app.on_event("startup")
 async def startup():
-    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain
+    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain, market_monitor
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
@@ -83,6 +85,10 @@ async def startup():
 
     supervisor = Supervisor(task_queue, db, redis_client, goal_engine, memory)
     asyncio.create_task(supervisor.run())
+
+    market_monitor = MarketMonitor(redis_client)
+    asyncio.create_task(market_monitor.run())
+
     log.info("API v2 started")
 
 
@@ -394,6 +400,52 @@ async def update_settings(s: SettingsUpdate):
     if data:
         await redis_client.hset(SETTINGS_KEY, mapping=data)
     return {"status": "saved", **data}
+
+
+# ── Screenshots ───────────────────────────────────────────────────────────────
+
+# ── Trading endpoints ─────────────────────────────────────────────────────────
+
+class TradingWatchlist(BaseModel):
+    forex:  Optional[list] = None
+    stocks: Optional[list] = None
+
+
+@app.get("/trading/signals")
+async def get_signals(limit: int = 50):
+    raw = await redis_client.lrange("trading:signal_history", 0, limit - 1)
+    return [json.loads(r) for r in raw]
+
+
+@app.get("/trading/config")
+async def get_trading_config():
+    forex_raw  = await redis_client.get("trading:watchlist:forex")
+    stocks_raw = await redis_client.get("trading:watchlist:stocks")
+    interval   = await redis_client.get("trading:interval")
+    threshold  = await redis_client.get("trading:confidence")
+    return {
+        "forex":      forex_raw.split(",")  if forex_raw  else DEFAULT_FOREX,
+        "stocks":     stocks_raw.split(",") if stocks_raw else DEFAULT_STOCKS,
+        "interval_s": int(interval)  if interval  else 600,
+        "confidence": float(threshold) if threshold else 0.68,
+        "monitoring": market_monitor._running if market_monitor else False,
+    }
+
+
+@app.post("/trading/config")
+async def set_trading_config(wl: TradingWatchlist):
+    if wl.forex is not None:
+        await redis_client.set("trading:watchlist:forex", ",".join(wl.forex))
+    if wl.stocks is not None:
+        await redis_client.set("trading:watchlist:stocks", ",".join(wl.stocks))
+    return {"status": "saved"}
+
+
+@app.post("/trading/scan-now")
+async def trigger_scan():
+    if market_monitor:
+        asyncio.create_task(market_monitor._scan_all())
+    return {"status": "scan_started"}
 
 
 # ── Screenshots ───────────────────────────────────────────────────────────────
