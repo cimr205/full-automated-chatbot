@@ -12,6 +12,7 @@ import httpx
 import redis.asyncio as aioredis
 
 from .signal_engine import score_signal, MIN_CONFIDENCE
+from .position_manager import PositionManager
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +45,10 @@ _YF_PERIOD = {
 
 class MarketMonitor:
     def __init__(self, redis: aioredis.Redis):
-        self._redis  = redis
-        self._running = False
-        self._last_signal: dict[str, dict] = {}   # symbol → {direction, ts}
+        self._redis    = redis
+        self._running  = False
+        self._last_signal: dict[str, dict] = {}
+        self.positions = PositionManager(redis)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -54,6 +56,8 @@ class MarketMonitor:
         self._running = True
         log.info("MarketMonitor started (interval=%ds, confidence≥%.0f%%)",
                  MONITOR_INTERVAL, CONFIDENCE_THRESH * 100)
+        # Start position monitor as concurrent task
+        asyncio.create_task(self.positions.run())
         while self._running:
             try:
                 await self._scan_all()
@@ -93,19 +97,36 @@ class MarketMonitor:
             return
 
         ohlcv_4h = _resample_4h(ohlcv_1h)
-
-        # Daily data for long-term trend
         ohlcv_1d = await self._fetch(symbol, "1d")
 
         signal = score_signal(ohlcv_1h, ohlcv_4h, ohlcv_1d)
+
+        # Always journal the scan (even if signal is rejected)
+        await self._journal(symbol, market, signal, published=False)
+
         direction  = signal["direction"]
         confidence = signal["confidence"]
 
-        if direction == "neutral" or confidence < CONFIDENCE_THRESH:
-            log.debug("[%s] Weak signal: %s %.0f%%", symbol, direction, confidence * 100)
+        if direction == "neutral":
             return
 
-        # Cooldown: don't repeat the same direction within SIGNAL_COOLDOWN seconds
+        # Pre-trade checklist — all hard checks must pass
+        if not signal.get("checklist_ok"):
+            checklist = signal.get("checklist", {})
+            failed = [k for k, v in checklist.items() if not v]
+            log.info("[%s] Checklist failed: %s", symbol, failed)
+            return
+
+        if confidence < CONFIDENCE_THRESH:
+            log.debug("[%s] Confidence too low: %.0f%%", symbol, confidence * 100)
+            return
+
+        # Check daily signal cap (max 5 signals per day across all symbols)
+        if await self._daily_cap_reached():
+            log.info("Daily signal cap reached — skipping %s", symbol)
+            return
+
+        # Cooldown: don't repeat same direction within SIGNAL_COOLDOWN seconds
         now = datetime.now(timezone.utc).timestamp()
         last = self._last_signal.get(symbol, {})
         if last.get("direction") == direction and now - last.get("ts", 0) < SIGNAL_COOLDOWN:
@@ -114,6 +135,21 @@ class MarketMonitor:
 
         self._last_signal[symbol] = {"direction": direction, "ts": now}
         await self._publish(symbol, market, signal)
+
+        # Auto-open position and notify via Telegram
+        trade_id = await self.positions.open_trade(
+            symbol=symbol, market=market,
+            direction=direction,
+            entry=signal["price"],
+            stop_loss=signal["stop_loss"],
+            take_profit=signal["take_profit"],
+            partial_tp=signal.get("partial_tp", 0),
+            signal_data=signal,
+            source="auto",
+        )
+        await self._notify_trade_open(trade_id, symbol, signal)
+        await self._journal(symbol, market, signal, published=True)
+        await self._increment_daily_count()
 
     # ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -175,66 +211,151 @@ class MarketMonitor:
         price      = signal["price"]
         sl         = signal.get("stop_loss",   0)
         tp         = signal.get("take_profit", 0)
-        reasons    = signal.get("reasons", [])
-        timeframes = signal.get("timeframes", 1)
-        rsi_val    = signal.get("rsi", 50)
+        partial_tp = signal.get("partial_tp",  0)
+        rr         = signal.get("rr_ratio",    0)
+        reasons    = signal.get("reasons",     [])
+        setups     = signal.get("setups",      [])
+        setup_type = signal.get("setup_type")
+        session    = signal.get("session",     {})
+        confluence = signal.get("confluence",  0)
+        checklist  = signal.get("checklist",   {})
+        timeframes = signal.get("timeframes",  1)
+        rsi_val    = signal.get("rsi",  50)
         vol_r      = signal.get("vol_ratio", 1.0)
 
         dir_emoji  = "📈 LONG / KØB" if direction == "long" else "📉 SHORT / SÆLG"
         market_tag = "💱 Forex" if market == "forex" else "📊 Aktier/Indeks"
+        sess_name  = session.get("name", "Ukendt")
+        prime_tag  = " ⭐ PRIME" if session.get("prime") else ""
 
-        # Format prices sensibly
-        def fmt(v): return f"{v:,.5f}" if v < 10 else f"{v:,.2f}"
+        def fmt(v):
+            if v == 0: return "0"
+            return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
 
-        tf_label = {1: "1 tidsramme", 2: "2 tidsrammer", 3: "3 tidsrammer"}.get(timeframes, str(timeframes))
+        cl_labels = {
+            "1_trend_aligned":    "Trend alignment",
+            "2_confluence_3plus": f"3+ confluence ({confluence} faktorer)",
+            "3_sl_logical":       "Logisk stop loss",
+            "4_rr_min_1_2":       f"R:R ≥ 1:2  (faktisk {rr:.1f}:1)",
+            "5_risk_1_2_pct":     "Max 1-2% risiko",
+            "6_not_chasing":      "Ikke chasing",
+            "7_active_session":   f"Aktiv session ({sess_name}{prime_tag})",
+            "8_setup_identified": f"Setup: {setup_type or 'ingen'}",
+        }
+        cl_lines = [
+            f"  {'✅' if checklist.get(k) else '❌'} {label}"
+            for k, label in cl_labels.items()
+        ]
 
+        tf_label = {1: "1 tf", 2: "2 tf", 3: "3 tf"}.get(timeframes, f"{timeframes} tf")
         message = (
             f"🚨 *HANDELSSIGNAL* — {market_tag}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"*{symbol}*   {dir_emoji}\n"
-            f"Confidence: *{confidence:.0%}*  ({tf_label} bekræftet)\n\n"
-            f"💰 Pris:         `{fmt(price)}`\n"
-            f"🛑 Stop Loss:  `{fmt(sl)}`\n"
-            f"🎯 Take Profit: `{fmt(tp)}`\n\n"
-            f"📊 *Indikatorer:*\n"
-            f"  RSI: {rsi_val:.1f}  |  Volumen: {vol_r:.1f}x\n\n"
-            f"*Bekræftelser ({len(reasons)}):*\n"
-            + "\n".join(f"  ✅ {r}" for r in reasons[:6]) +
-            f"\n\n⚠️ _Svar 'ja' på Telegram for at bekræfte denne trade._"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"*{symbol}*  {dir_emoji}\n"
+            f"Confidence: *{confidence:.0%}*  |  {tf_label}  |  {confluence} faktorer\n\n"
+            f"💰 Entry:          `{fmt(price)}`\n"
+            f"🛑 Stop Loss:    `{fmt(sl)}`  _(1.5x ATR)_\n"
+            f"🎯 Target:         `{fmt(tp)}`  _(R:R = {rr:.1f}:1)_\n"
+            f"💛 Delvis profit:  `{fmt(partial_tp)}`  _(ved 1.5R → flyt SL til BE)_\n\n"
+            f"*Pre-trade checklist:*\n" + "\n".join(cl_lines) +
+            (f"\n\n*Setups:*\n" + "\n".join(f"  🔷 {s}" for s in setups) if setups else "") +
+            f"\n\n*Confluence:*\n" + "\n".join(f"  • {r}" for r in reasons[:5]) +
+            f"\n\n_RSI: {rsi_val:.1f}  |  Vol: {vol_r:.1f}x  |  {sess_name}_"
         )
 
         payload = {
-            "symbol":     symbol,
-            "market":     market,
-            "direction":  direction,
-            "confidence": confidence,
-            "price":      price,
-            "stop_loss":  sl,
-            "take_profit": tp,
-            "reasons":    reasons,
-            "message":    message,
-            "ts":         datetime.utcnow().isoformat(),
+            "symbol":      symbol,      "market":     market,
+            "direction":   direction,   "confidence": confidence,
+            "price":       price,       "stop_loss":  sl,
+            "take_profit": tp,          "partial_tp": partial_tp,
+            "rr_ratio":    rr,          "setup_type": setup_type,
+            "session":     sess_name,   "confluence": confluence,
+            "checklist":   checklist,   "reasons":    reasons,
+            "message":     message,     "ts":         datetime.utcnow().isoformat(),
         }
 
-        # Push to Telegram via supervisor notifications channel
         await self._redis.publish("supervisor:notifications", json.dumps({
-            "message":  message,
-            "task_id":  f"signal_{symbol.replace('/', '_').replace('=', '')}",
-            "parse_mode": "Markdown",
+            "message": message, "parse_mode": "Markdown",
+            "task_id": f"signal_{symbol.replace('/', '_').replace('=', '')}",
         }))
 
-        # Store in signal history (last 200)
         key = "trading:signal_history"
         await self._redis.lpush(key, json.dumps(payload))
-        await self._redis.ltrim(key, 0, 199)
+        await self._redis.ltrim(key, 0, 499)
+        await self._redis.publish("ws:events", json.dumps({"type": "trading_signal", **payload}))
 
-        # Publish on trading channel (for dashboard WebSocket)
-        await self._redis.publish("ws:events", json.dumps({
-            "type": "trading_signal", **payload,
+        log.info("Signal: %s %s %.0f%% R:R=%.1f session=%s setup=%s",
+                 symbol, direction, confidence * 100, rr, sess_name, setup_type or "none")
+
+    async def _notify_trade_open(self, trade_id: str, symbol: str, signal: dict):
+        direction  = signal["direction"]
+        price      = signal["price"]
+        sl         = signal["stop_loss"]
+        tp         = signal["take_profit"]
+        partial_tp = signal.get("partial_tp", 0)
+        rr         = signal.get("rr_ratio", 0)
+        setup      = signal.get("setup_type", "Signal-baseret")
+        session    = signal.get("session", {}).get("name", "")
+        reasons    = signal.get("reasons", [])[:4]
+
+        def fmt(v): return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
+
+        dir_emoji = "📈 LONG" if direction == "long" else "📉 SHORT"
+        msg = (
+            f"✅ *TRADE ÅBNET AUTOMATISK*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"*{symbol}*  {dir_emoji}\n"
+            f"Trade ID: `{trade_id}`\n\n"
+            f"💰 Entry:          `{fmt(price)}`\n"
+            f"🛑 Stop Loss:    `{fmt(sl)}`\n"
+            f"🎯 Take Profit:  `{fmt(tp)}`\n"
+            f"💛 Delvis ved:   `{fmt(partial_tp)}` _(→ flyt SL til BE)_\n"
+            f"R:R = *{rr:.1f}:1*\n\n"
+            f"*Grundlag:*\n"
+            f"  📐 Setup: {setup}\n"
+            f"  🕐 Session: {session}\n" +
+            "\n".join(f"  • {r}" for r in reasons) +
+            f"\n\n_Systemet overvåger positionen automatisk._\n"
+            f"_Stop: /close {trade_id}_"
+        )
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": msg, "parse_mode": "Markdown",
+            "task_id": f"trade_open_{trade_id}",
         }))
 
-        log.info("Signal: %s %s %.0f%% @%s SL=%s TP=%s",
-                 symbol, direction, confidence * 100, fmt(price), fmt(sl), fmt(tp))
+    async def _journal(self, symbol: str, market: str, signal: dict, published: bool):
+        try:
+            entry = {
+                "symbol":       symbol,      "market":      market,
+                "direction":    signal.get("direction"),
+                "confidence":   signal.get("confidence", 0),
+                "setup_type":   signal.get("setup_type"),
+                "session":      signal.get("session", {}).get("name"),
+                "confluence":   signal.get("confluence", 0),
+                "rr_ratio":     signal.get("rr_ratio", 0),
+                "price":        signal.get("price", 0),
+                "stop_loss":    signal.get("stop_loss", 0),
+                "take_profit":  signal.get("take_profit", 0),
+                "checklist_ok": signal.get("checklist_ok"),
+                "published":    published,
+                "ts":           datetime.utcnow().isoformat(),
+                "date":         datetime.utcnow().strftime("%Y-%m-%d"),
+            }
+            await self._redis.lpush("trading:journal", json.dumps(entry))
+            await self._redis.ltrim("trading:journal", 0, 999)
+        except Exception as e:
+            log.warning("Journal write error: %s", e)
+
+    async def _daily_cap_reached(self, cap: int = 5) -> bool:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        count = await self._redis.get(f"trading:daily_signals:{today}")
+        return int(count or 0) >= cap
+
+    async def _increment_daily_count(self):
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        key   = f"trading:daily_signals:{today}"
+        await self._redis.incr(key)
+        await self._redis.expire(key, 86400 * 2)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

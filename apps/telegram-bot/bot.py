@@ -87,9 +87,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Autonomous Execution System*\n\n"
         "*Bare skriv til mig — AI forstår naturligt sprog.*\n\n"
-        "*📊 Market Monitor*\n"
-        "/market — seneste handelssignaler\n"
-        "/watchlist — vis/sæt overvågningsliste\n"
+        "*📊 Trading*\n"
+        "/trades — åbne trades + statistik\n"
+        "/trade SYM long ENTRY sl=X tp=Y — log trade manuelt\n"
+        "/close <id> [pris] — luk trade\n"
+        "/why <id> — grundlag for trade\n"
+        "/market — seneste signaler\n"
+        "/watchlist — vis/ændr overvågningsliste\n"
         "/scan — scan markedet NU\n\n"
         "*Opgaver & Mål*\n"
         "/task <desc> — kø en-gangs opgave\n"
@@ -494,6 +498,160 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show all open trades."""
+    if not await auth(update):
+        return
+    try:
+        trades = await api_get("/trading/trades")
+        if not trades:
+            await update.message.reply_text("Ingen åbne trades. Systemet scanner markedet automatisk.")
+            return
+        lines = []
+        for t in trades:
+            def fmt(v): return f"{v:,.5f}" if abs(v or 0) < 10 else f"{v:,.2f}"
+            d = "📈" if t.get("direction") == "long" else "📉"
+            sym = t.get("symbol", "?")
+            entry = fmt(t.get("entry", 0))
+            sl = fmt(t.get("stop_loss", 0))
+            tp = fmt(t.get("take_profit", 0))
+            src = "🤖" if t.get("source") == "auto" else "👤"
+            lines.append(
+                f"{src}{d} *{sym}* `{t['trade_id']}`\n"
+                f"  Entry: `{entry}` | SL: `{sl}` | TP: `{tp}`\n"
+                f"  Åbnet: {t.get('opened_at','')[:16]}"
+            )
+        stats = await api_get("/trading/stats")
+        stats_text = (
+            f"\n\n📊 *Statistik ({stats.get('total',0)} lukkede trades):*\n"
+            f"Win rate: {stats.get('win_rate',0):.0%}  |  "
+            f"Gns R:R: {stats.get('avg_rr',0):.2f}R  |  "
+            f"Total: {stats.get('total_r',0):+.2f}R"
+        )
+        await update.message.reply_text(
+            "*Åbne trades:*\n\n" + "\n\n".join(lines) + stats_text,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manually log a trade: /trade EURUSD=X long 1.08500 sl=1.08200 tp=1.09100 [forex|stocks]"""
+    if not await auth(update):
+        return
+    if len(ctx.args) < 4:
+        await update.message.reply_text(
+            "Usage: `/trade SYMBOL long/short ENTRY sl=SL tp=TP [forex|stocks]`\n"
+            "Eksempel: `/trade EURUSD=X long 1.08500 sl=1.08200 tp=1.09100`",
+            parse_mode="Markdown"
+        )
+        return
+    try:
+        symbol    = ctx.args[0].upper()
+        direction = ctx.args[1].lower()
+        entry     = float(ctx.args[2])
+        sl = tp = partial_tp = 0.0
+        market = "forex"
+        note = ""
+        for arg in ctx.args[3:]:
+            if arg.startswith("sl="):   sl = float(arg[3:])
+            elif arg.startswith("tp="): tp = float(arg[3:])
+            elif arg.startswith("pt="): partial_tp = float(arg[3:])
+            elif arg in ("forex", "stocks", "crypto"): market = arg
+            else: note += arg + " "
+        if not sl or not tp:
+            await update.message.reply_text("Angiv sl= og tp= værdier.")
+            return
+        data = await api_post("/trading/trades", {
+            "symbol": symbol, "market": market, "direction": direction,
+            "entry": entry, "stop_loss": sl, "take_profit": tp,
+            "partial_tp": partial_tp, "note": note.strip(),
+        })
+        def fmt(v): return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
+        rr = abs(tp - entry) / abs(sl - entry) if sl != entry else 0
+        await update.message.reply_text(
+            f"✅ *Trade logget*\n"
+            f"ID: `{data['trade_id']}`\n"
+            f"*{symbol}* {direction.upper()} @ `{fmt(entry)}`\n"
+            f"SL: `{fmt(sl)}`  |  TP: `{fmt(tp)}`  |  R:R: {rr:.1f}:1\n\n"
+            f"Systemet overvåger positionen og melder ud ved SL/TP.\n"
+            f"_Luk manuelt: /close {data['trade_id']}_",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Close a trade: /close <trade_id> [exit_price]"""
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /close <trade_id> [exit_price]")
+        return
+    trade_id = ctx.args[0]
+    try:
+        # Get current price if not specified
+        if len(ctx.args) >= 2:
+            exit_price = float(ctx.args[1])
+        else:
+            trade = await api_get(f"/trading/trades/{trade_id}")
+            exit_price = trade.get("entry", 0)  # placeholder; position monitor will use live price
+
+        data = await api_post(f"/trading/trades/{trade_id}/close?exit_price={exit_price}", {})
+        pnl  = data.get("pnl_r", 0)
+        emoji = "💚" if pnl > 0 else "❤️"
+        await update.message.reply_text(
+            f"{emoji} *Trade lukket*\n"
+            f"`{trade_id}`  P&L: `{pnl:+.2f}R`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_why(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Explain why a trade was entered: /why <trade_id>"""
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /why <trade_id>")
+        return
+    try:
+        trade = await api_get(f"/trading/trades/{ctx.args[0]}")
+        r = trade.get("reasoning", {})
+        indicators = r.get("indicators", [])
+        checklist  = r.get("checklist", {})
+
+        cl_text = "\n".join(
+            f"  {'✅' if v else '❌'} {k.replace('_', ' ').title()}"
+            for k, v in checklist.items()
+        ) if checklist else "  (ingen checklist gemt)"
+
+        ind_text = "\n".join(f"  • {i}" for i in indicators[:6]) if indicators else "  (ingen)"
+
+        def fmt(v): return f"{v:,.5f}" if abs(v or 0) < 10 else f"{v:,.2f}"
+
+        await update.message.reply_text(
+            f"🔍 *Grundlag for {trade['symbol']} {trade['direction'].upper()}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📐 Setup: {r.get('setup') or 'Ukendt'}\n"
+            f"🕐 Session: {r.get('session') or 'Ukendt'}\n"
+            f"📊 Confidence: {(r.get('confidence') or 0):.0%}\n"
+            f"🔗 Confluence: {r.get('confluence') or 0} faktorer\n"
+            f"📈 Planlagt R:R: {(r.get('rr_planned') or 0):.1f}:1\n\n"
+            f"*Pre-trade checklist:*\n{cl_text}\n\n"
+            f"*Indicator confluence:*\n{ind_text}\n\n"
+            f"Entry: `{fmt(trade['entry'])}`  "
+            f"SL: `{fmt(trade['stop_loss'])}`  "
+            f"TP: `{fmt(trade['take_profit'])}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 # ── CRM commands ───────────────────────────────────────────────────────────────
 
 async def cmd_lead(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -667,6 +825,7 @@ async def main():
 
     handlers = [
         ("start", cmd_start), ("help", cmd_start),
+        ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close), ("why", cmd_why),
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),

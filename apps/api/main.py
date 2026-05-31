@@ -49,6 +49,7 @@ from core.goals.goal_engine import GoalEngine
 from core.memory.vault import SecureVault
 from core.memory.brain import Brain
 from core.trading.market_monitor import MarketMonitor, DEFAULT_FOREX, DEFAULT_STOCKS
+from core.trading.position_manager import PositionManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -64,11 +65,12 @@ goal_engine: GoalEngine = None
 vault: SecureVault = None
 brain: Brain = None
 market_monitor: MarketMonitor = None
+positions: PositionManager = None
 
 
 @app.on_event("startup")
 async def startup():
-    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain, market_monitor
+    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain, market_monitor, positions
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
@@ -87,6 +89,7 @@ async def startup():
     asyncio.create_task(supervisor.run())
 
     market_monitor = MarketMonitor(redis_client)
+    positions = market_monitor.positions
     asyncio.create_task(market_monitor.run())
 
     log.info("API v2 started")
@@ -446,6 +449,67 @@ async def trigger_scan():
     if market_monitor:
         asyncio.create_task(market_monitor._scan_all())
     return {"status": "scan_started"}
+
+
+class TradeOpen(BaseModel):
+    symbol:      str
+    market:      str = "forex"
+    direction:   str            # "long" or "short"
+    entry:       float
+    stop_loss:   float
+    take_profit: float
+    partial_tp:  float = 0
+    size:        float = 0
+    note:        str   = ""
+
+
+@app.post("/trading/trades")
+async def open_trade(req: TradeOpen):
+    signal_data = {"setup_type": req.note or "Manual entry"} if req.note else None
+    trade_id = await positions.open_trade(
+        symbol=req.symbol, market=req.market, direction=req.direction,
+        entry=req.entry, stop_loss=req.stop_loss, take_profit=req.take_profit,
+        partial_tp=req.partial_tp, size=req.size,
+        signal_data=signal_data, source="manual",
+    )
+    return {"trade_id": trade_id, "status": "open"}
+
+
+@app.get("/trading/trades")
+async def list_trades():
+    return await positions.list_open()
+
+
+@app.get("/trading/trades/{trade_id}")
+async def get_trade(trade_id: str):
+    trade = await positions.get_trade(trade_id)
+    if not trade:
+        raise HTTPException(404, "Trade not found")
+    return trade
+
+
+@app.post("/trading/trades/{trade_id}/close")
+async def close_trade(trade_id: str, exit_price: float):
+    trade = await positions.close_trade(trade_id, exit_price, reason="manual")
+    if not trade:
+        raise HTTPException(404, "Trade not found")
+    return trade
+
+
+@app.get("/trading/history")
+async def trade_history(limit: int = 50):
+    return await positions.history(limit)
+
+
+@app.get("/trading/stats")
+async def trade_stats():
+    return await positions.stats()
+
+
+@app.get("/trading/journal")
+async def get_journal(limit: int = 100):
+    raw = await redis_client.lrange("trading:journal", 0, limit - 1)
+    return [json.loads(r) for r in raw]
 
 
 # ── Screenshots ───────────────────────────────────────────────────────────────
