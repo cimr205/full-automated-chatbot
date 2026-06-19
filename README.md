@@ -130,6 +130,39 @@ infrastructure/
   railway.json
 ```
 
+## Trading (MT5 + risk protection)
+
+The system can also auto-scan Forex/XAUUSD and execute trades via a Windows
+MT5 terminal, with account-level risk protection so it never blows past a
+daily-loss or max-drawdown limit.
+
+**Setup:**
+1. Run `mt5_agent/mt5_worker.py` (via `START.bat`) on the Windows PC/VPS with MT5 logged in.
+   This worker must be **redeployed** (re-copied) whenever it changes — it now also reports
+   live account equity/balance and per-symbol contract data used for position sizing.
+2. Set the risk env vars in `.env` (see `.env.example`): `RISK_PER_TRADE_PCT`,
+   `RISK_MAX_DAILY_LOSS_PCT`, `RISK_MAX_TOTAL_DRAWDOWN_PCT`, `SIGNAL_CONFIRM_BAND`.
+
+**How it stays safe:**
+- Position size is computed from real account equity and the broker's own contract/tick
+  data for each symbol (correct for both forex and XAUUSD, whose contract sizes differ a lot).
+- Borderline-confidence signals are **not** traded on the first read — they must reproduce
+  the same direction + setup on the next scan before the bot enters.
+- If daily loss or total drawdown exceeds the configured limit, trading locks immediately
+  and stays locked — including across restarts — until you review the account and send `/unlock_risk`.
+
+**Telegram commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/scan` | Trigger an immediate market scan |
+| `/trades` | List open trades + stats |
+| `/trading_pause` / `/trading_resume` | Pause/resume new auto-trades (open positions still monitored) |
+| `/risk` | Show equity, daily/total drawdown, and lock status |
+| `/unlock_risk` | Clear a tripped risk-lock after reviewing the account |
+| `/report daily` / `/report weekly` | Send a performance report now (also sent automatically once per day) |
+| `/watchlist` | View/edit the Forex + Stocks watchlists |
+
 ## Recovery
 
 - Browser sessions persist across restarts via Chromium persistent context

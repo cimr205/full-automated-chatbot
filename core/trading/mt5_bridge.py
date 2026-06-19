@@ -7,6 +7,7 @@ and listens for execution results to update position tracking.
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime
 
 import redis.asyncio as aioredis
@@ -76,6 +77,12 @@ class MT5Bridge:
                         else:
                             log.error("MT5 close failed: %s", result.get("error"))
 
+                    elif command in ("get_account_info", "get_symbol_info"):
+                        trade_id = data.get("trade_id")
+                        result   = data.get("result", {})
+                        if trade_id and trade_id in self._pending:
+                            self._pending.pop(trade_id).set_result(result)
+
                 except Exception as e:
                     log.warning("MT5Bridge result parse error: %s", e)
         finally:
@@ -142,6 +149,38 @@ class MT5Bridge:
         except asyncio.TimeoutError:
             self._pending.pop(trade_id, None)
             return {"error": "timeout"}
+
+    async def get_account_info(self) -> dict:
+        """Fetch live balance/equity from MT5. Returns {} if worker offline."""
+        req_id = f"acct_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "get_account_info", "trade_id": req_id,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout — er MT5 Worker kørende på din PC?"}
+
+    async def get_symbol_info(self, symbol: str) -> dict:
+        """Fetch contract size / tick value / volume limits for a symbol."""
+        req_id = f"sym_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "get_symbol_info", "trade_id": req_id, "symbol": symbol,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout — er MT5 Worker kørende på din PC?"}
 
     async def ping(self) -> bool:
         """Check if MT5 Worker is online."""

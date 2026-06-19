@@ -50,6 +50,7 @@ from core.memory.vault import SecureVault
 from core.memory.brain import Brain
 from core.trading.market_monitor import MarketMonitor, DEFAULT_FOREX, DEFAULT_STOCKS
 from core.trading.position_manager import PositionManager
+from core.trading import reporting as trading_reporting
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ async def startup():
     supervisor = Supervisor(task_queue, db, redis_client, goal_engine, memory)
     asyncio.create_task(supervisor.run())
 
-    market_monitor = MarketMonitor(redis_client)
+    market_monitor = MarketMonitor(redis_client, db=db)
     positions = market_monitor.positions
     asyncio.create_task(market_monitor.run())
 
@@ -510,6 +511,43 @@ async def trade_stats():
 async def get_journal(limit: int = 100):
     raw = await redis_client.lrange("trading:journal", 0, limit - 1)
     return [json.loads(r) for r in raw]
+
+
+@app.get("/trading/risk")
+async def get_risk_status():
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    return await market_monitor.risk.status()
+
+
+@app.post("/trading/pause")
+async def pause_trading():
+    await redis_client.set("trading:paused", "1")
+    return {"status": "paused"}
+
+
+@app.post("/trading/resume")
+async def resume_trading():
+    await redis_client.delete("trading:paused")
+    return {"status": "resumed"}
+
+
+@app.post("/trading/unlock-risk")
+async def unlock_risk():
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    was_locked = await market_monitor.risk.unlock()
+    return {"status": "unlocked" if was_locked else "was_not_locked"}
+
+
+@app.get("/trading/report")
+async def get_report(period: str = "daily"):
+    if period not in ("daily", "weekly"):
+        raise HTTPException(400, "period must be 'daily' or 'weekly'")
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    message = await trading_reporting.send_report(redis_client, positions, market_monitor.risk, period=period)
+    return {"status": "sent", "message": message}
 
 
 # ── Screenshots ───────────────────────────────────────────────────────────────

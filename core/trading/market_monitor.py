@@ -11,21 +11,29 @@ from datetime import datetime, timezone, time as dtime
 import httpx
 import redis.asyncio as aioredis
 
-from .signal_engine import score_signal, MIN_CONFIDENCE
+from .signal_engine import score_signal
 from .position_manager import PositionManager
 from .mt5_bridge import MT5Bridge
+from .risk_manager import RiskManager
+from . import reporting
 
 log = logging.getLogger(__name__)
 
 MONITOR_INTERVAL   = int(os.getenv("MONITOR_INTERVAL", "600"))   # 10 min default
 CONFIDENCE_THRESH  = float(os.getenv("SIGNAL_CONFIDENCE", "0.68"))
 SIGNAL_COOLDOWN    = int(os.getenv("SIGNAL_COOLDOWN", "14400"))   # 4h per symbol
+CONFIRM_BAND       = float(os.getenv("SIGNAL_CONFIRM_BAND", "0.07"))   # borderline zone above the floor
+PENDING_KEY_PREFIX = "trading:pending:"
+PENDING_TTL        = MONITOR_INTERVAL * 2   # expire if not reconfirmed within ~2 cycles
 
 # ── Default watchlists ────────────────────────────────────────────────────────
 
 DEFAULT_FOREX = [
     "EURUSD=X", "GBPUSD=X", "USDJPY=X", "GBPJPY=X",
     "AUDUSD=X", "USDCHF=X", "USDCAD=X", "EURGBP=X",
+    "EURJPY=X", "NZDUSD=X", "AUDJPY=X", "NZDJPY=X",
+    "EURAUD=X", "GBPAUD=X", "AUDNZD=X", "CHFJPY=X", "CADJPY=X",
+    "XAUUSD=X",
 ]
 DEFAULT_STOCKS = [
     "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
@@ -45,12 +53,13 @@ _YF_PERIOD = {
 
 
 class MarketMonitor:
-    def __init__(self, redis: aioredis.Redis):
+    def __init__(self, redis: aioredis.Redis, db=None):
         self._redis    = redis
         self._running  = False
         self._last_signal: dict[str, dict] = {}
         self.positions = PositionManager(redis)
         self.mt5       = MT5Bridge(redis)
+        self.risk      = RiskManager(redis, db=db)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -73,6 +82,12 @@ class MarketMonitor:
     # ── Scan loop ─────────────────────────────────────────────────────────────
 
     async def _scan_all(self):
+        await self._refresh_account()
+        try:
+            await reporting.maybe_send_daily_report(self._redis, self.positions, self.risk)
+        except Exception as e:
+            log.warning("Daily report check failed: %s", e)
+
         forex_raw  = await self._redis.get("trading:watchlist:forex")
         stocks_raw = await self._redis.get("trading:watchlist:stocks")
 
@@ -123,6 +138,19 @@ class MarketMonitor:
             log.debug("[%s] Confidence too low: %.0f%%", symbol, confidence * 100)
             return
 
+        # Risk gate — never open a new trade while paused or locked
+        can_trade, lock_reason = await self.risk.check_can_trade()
+        if not can_trade:
+            log.info("[%s] Skipped — %s", symbol, lock_reason)
+            return
+
+        # Borderline confidence — don't act on a single read. Require the
+        # *next* scan to reproduce the same direction + setup before entering.
+        setup_type = signal.get("setup_type")
+        if not await self._confirmed(symbol, direction, setup_type, confidence):
+            log.info("[%s] Borderline signal (%.0f%%) — waiting for re-confirmation", symbol, confidence * 100)
+            return
+
         # Check daily signal cap (max 5 signals per day across all symbols)
         if await self._daily_cap_reached():
             log.info("Daily signal cap reached — skipping %s", symbol)
@@ -154,17 +182,19 @@ class MarketMonitor:
         try:
             mt5_online = await self.mt5.ping()
             if mt5_online:
+                volume = await self._sized_volume(symbol, signal["price"], signal["stop_loss"])
                 mt5_result = await self.mt5.send_open(
                     trade_id=trade_id,
                     symbol=symbol,
                     direction=direction,
                     stop_loss=signal["stop_loss"],
                     take_profit=signal["take_profit"],
+                    volume=volume or 0,
                 )
                 if "error" in mt5_result:
                     log.warning("MT5 execution failed: %s", mt5_result["error"])
                 else:
-                    log.info("MT5 order placed: ticket=%s", mt5_result.get("ticket"))
+                    log.info("MT5 order placed: ticket=%s vol=%s", mt5_result.get("ticket"), volume)
         except Exception as e:
             log.warning("MT5 execution error (non-fatal): %s", e)
 
@@ -377,6 +407,62 @@ class MarketMonitor:
         key   = f"trading:daily_signals:{today}"
         await self._redis.incr(key)
         await self._redis.expire(key, 86400 * 2)
+
+    # ── Risk / confirmation helpers ──────────────────────────────────────────
+
+    async def _refresh_account(self):
+        """Pull live equity/balance from MT5 once per scan cycle (no-op if offline)."""
+        try:
+            if not await self.mt5.ping():
+                return
+            info = await self.mt5.get_account_info()
+            if "error" in info:
+                return
+            await self.risk.refresh_equity(info["equity"], info["balance"])
+        except Exception as e:
+            log.warning("Account refresh failed: %s", e)
+
+    async def _confirmed(self, symbol: str, direction: str, setup_type: str | None,
+                         confidence: float) -> bool:
+        """
+        High-confidence signals (clear of the borderline band) execute immediately.
+        Borderline signals need the *next* cycle to reproduce the same
+        direction + setup before they're allowed to trade.
+        """
+        key = f"{PENDING_KEY_PREFIX}{symbol}"
+        if confidence >= CONFIDENCE_THRESH + CONFIRM_BAND:
+            await self._redis.delete(key)
+            return True
+
+        raw = await self._redis.get(key)
+        pending = json.loads(raw) if raw else None
+        if pending and pending.get("direction") == direction and pending.get("setup_type") == setup_type:
+            await self._redis.delete(key)
+            return True
+
+        await self._redis.set(
+            key,
+            json.dumps({"direction": direction, "setup_type": setup_type}),
+            ex=PENDING_TTL,
+        )
+        return False
+
+    async def _sized_volume(self, symbol: str, entry: float, stop_loss: float) -> float | None:
+        """Equity-based lot size using the broker's real contract/tick data. None = use bridge default."""
+        try:
+            status = await self.risk.status()
+            equity = status.get("equity") or 0
+            if not equity:
+                return None
+            symbol_info = await self.mt5.get_symbol_info(symbol)
+            if "error" in symbol_info:
+                return None
+            risk_amount = self.risk.risk_amount(equity)
+            sl_distance = abs(entry - stop_loss)
+            return self.risk.compute_volume(risk_amount, sl_distance, symbol_info)
+        except Exception as e:
+            log.warning("[%s] sizing failed, falling back to default lot: %s", symbol, e)
+            return None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

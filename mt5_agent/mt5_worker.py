@@ -57,6 +57,15 @@ SYMBOL_MAP = {
     "EURGBP=X": "EURGBP",
     "EURJPY=X": "EURJPY",
     "NZDUSD=X": "NZDUSD",
+    "AUDJPY=X": "AUDJPY",
+    "NZDJPY=X": "NZDJPY",
+    "EURAUD=X": "EURAUD",
+    "GBPAUD=X": "GBPAUD",
+    "AUDNZD=X": "AUDNZD",
+    "CHFJPY=X": "CHFJPY",
+    "CADJPY=X": "CADJPY",
+    "XAUUSD=X": "XAUUSD",
+    "XAGUSD=X": "XAGUSD",
     "SPY":   "US500",
     "QQQ":   "US100",
     "^GSPC": "US500",
@@ -123,6 +132,52 @@ def mt5_open_trade(symbol: str, direction: str, volume: float,
         "volume":    result.volume,
         "symbol":    symbol,
         "direction": direction,
+    }
+
+
+def mt5_get_account_info() -> dict:
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not mt5.initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    info = mt5.account_info()
+    mt5.shutdown()
+    if info is None:
+        return {"error": f"account_info fejlede: {mt5.last_error()}"}
+
+    return {
+        "balance":  info.balance,
+        "equity":   info.equity,
+        "margin":   info.margin,
+        "currency": info.currency,
+    }
+
+
+def mt5_get_symbol_info(symbol: str) -> dict:
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not mt5.initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        mt5.shutdown()
+        return {"error": f"Symbol {symbol} ikke fundet"}
+    if not info.visible:
+        mt5.symbol_select(symbol, True)
+        info = mt5.symbol_info(symbol)
+    mt5.shutdown()
+
+    return {
+        "symbol":              symbol,
+        "trade_contract_size": info.trade_contract_size,
+        "trade_tick_value":    info.trade_tick_value,
+        "trade_tick_size":     info.trade_tick_size,
+        "volume_min":          info.volume_min,
+        "volume_max":          info.volume_max,
+        "volume_step":         info.volume_step,
+        "digits":              info.digits,
     }
 
 
@@ -213,6 +268,29 @@ async def handle_command(cmd: dict, redis: aioredis.Redis):
             "mt5_available": MT5_AVAILABLE,
         }
         log.info("Ping → pong (mt5_available=%s)", MT5_AVAILABLE)
+
+    elif command == "get_account_info":
+        result  = mt5_get_account_info()
+        payload = {
+            "trade_id": trade_id,
+            "command":  "get_account_info",
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+        if "error" in result:
+            log.error("account_info fejlede: %s", result["error"])
+
+    elif command == "get_symbol_info":
+        result  = mt5_get_symbol_info(symbol)
+        payload = {
+            "trade_id": trade_id,
+            "command":  "get_symbol_info",
+            "symbol":   symbol,
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+        if "error" in result:
+            log.error("symbol_info fejlede for %s: %s", symbol, result["error"])
 
     else:
         return

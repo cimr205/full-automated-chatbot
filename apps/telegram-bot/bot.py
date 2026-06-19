@@ -498,6 +498,87 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_trading_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Pause the auto-trading scanner (it keeps monitoring open positions)."""
+    if not await auth(update):
+        return
+    try:
+        await api_post("/trading/pause", {})
+        await update.message.reply_text(
+            "⏸️ Auto-trading sat på pause. Åbne positioner overvåges stadig. /trading_resume for at genoptage.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_trading_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Resume the auto-trading scanner."""
+    if not await auth(update):
+        return
+    try:
+        await api_post("/trading/resume", {})
+        await update.message.reply_text("▶️ Auto-trading genoptaget.", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show current risk status: equity, daily/total drawdown, lock state."""
+    if not await auth(update):
+        return
+    try:
+        s = await api_get("/trading/risk")
+        if s.get("locked"):
+            status_line = f"🔒 LÅST — {s['locked']}"
+        elif s.get("paused"):
+            status_line = "⏸️ Pause (manuel)"
+        else:
+            status_line = "✅ Aktiv"
+        msg = (
+            f"📐 *Risk-status*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Status: {status_line}\n\n"
+            f"💰 Equity: `{s.get('equity', 0):,.2f}`\n"
+            f"📉 Dagens start: `{s.get('day_start_equity', 0):,.2f}`\n"
+            f"📈 Peak: `{s.get('peak_equity', 0):,.2f}`\n\n"
+            f"Max dagligt tab: *{s.get('max_daily_loss_pct', 0):.1f}%*\n"
+            f"Max drawdown: *{s.get('max_drawdown_pct', 0):.1f}%*\n"
+            f"Risiko/trade: *{s.get('risk_per_trade_pct', 0):.1f}%*"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_unlock_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manually clear a tripped risk-lock after reviewing the account."""
+    if not await auth(update):
+        return
+    try:
+        res = await api_post("/trading/unlock-risk", {})
+        if res.get("status") == "unlocked":
+            await update.message.reply_text("🔓 Risk-lock fjernet. Trading genoptaget.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("Der var ingen aktiv risk-lock.")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send a performance report now: /report [daily|weekly]"""
+    if not await auth(update):
+        return
+    period = (ctx.args[0] if ctx.args else "daily").lower()
+    if period not in ("daily", "weekly"):
+        await update.message.reply_text("Usage: /report daily|weekly")
+        return
+    try:
+        await api_get(f"/trading/report?period={period}")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show all open trades."""
     if not await auth(update):
@@ -827,6 +908,8 @@ async def main():
         ("start", cmd_start), ("help", cmd_start),
         ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close), ("why", cmd_why),
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan),
+        ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
+        ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),

@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS memory (
     value JSONB,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS trading_equity_snapshots (
+    id SERIAL PRIMARY KEY,
+    equity DOUBLE PRECISION,
+    balance DOUBLE PRECISION,
+    ts TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 
@@ -140,6 +147,32 @@ class Database:
                 )
         except Exception as e:
             log.error("DB set_memory error: %s", e)
+
+    async def save_equity_snapshot(self, equity: float, balance: float):
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO trading_equity_snapshots (equity, balance) VALUES ($1,$2)",
+                    equity, balance,
+                )
+        except Exception as e:
+            log.error("DB save_equity_snapshot error: %s", e)
+
+    async def get_equity_history(self, limit: int = 500) -> list:
+        if not self.pool:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT equity, balance, ts FROM trading_equity_snapshots ORDER BY ts DESC LIMIT $1",
+                    limit,
+                )
+                return [dict(r) for r in rows]
+        except Exception as e:
+            log.error("DB get_equity_history error: %s", e)
+        return []
 
     async def get_memory(self, key: str) -> Optional[dict]:
         if not self.pool:
