@@ -1,0 +1,67 @@
+════════════════════════════════════════════════════════════
+  MT4 Bot Worker — Brugervejledning
+════════════════════════════════════════════════════════════
+
+Hvad er dette?
+──────────────
+Dette forbinder din bot (der kører på Railway) til MetaTrader 4
+på din computer. MT4 har ingen officiel programmeringspakke som
+MT5, så vi bruger en lille "Expert Advisor" (MT4_Bridge.mq4) der
+lytter efter handelskommandoer som tekstfiler — det er en
+velkendt og stabil metode, ingen DLL'er eller ekstra software.
+
+Sådan starter du (gør det kun én gang):
+─────────────────────────────────────────
+1. Dobbeltklik på  START.bat
+2. Den finder automatisk din MT4-installation
+3. Den spørger om din Railway Redis URL
+4. Den kopierer MT4_Bridge.mq4 ind i MT4's Experts-mappe
+
+Derefter — i selve MetaTrader 4:
+───────────────────────────────────
+1. Tryk F4 (åbner MetaEditor)
+2. I venstre panel: find MT4_Bridge under Experts
+3. Dobbeltklik på den, tryk F7 (Compile) — skal sige "0 errors"
+4. Gå tilbage til MetaTrader 4
+5. Tryk Ctrl+N (åbner Navigator)
+6. Under Expert Advisors: find MT4_Bridge
+7. Træk den ind på et åbent chart (vælg fx EURUSD)
+8. I popup-vinduet: gå til "Common"-fanen og sæt hak ved
+   "Allow live trading" → tryk OK
+9. Du skal se et lille smiley-ansigt i øverste højre hjørne
+   af chartet — det betyder den kører ✓
+
+Sådan finder du din Railway Redis URL:
+────────────────────────────────────────
+1. Gå til railway.app og log ind
+2. Klik på dit projekt → Redis-tjenesten → fanen "Connect"
+3. Kopier URL'en der starter med redis://default:...
+
+Hvad sker der derefter?
+──────────────────────────
+• Din Telegram-bot sender:  ✅ MT4 Worker tilkoblet
+• Fra nu af udføres handler automatisk i MetaTrader 4
+• Begge vinduer (START.bat og MetaTrader 4) skal være åbne
+
+Vigtigt:
+──────────
+• MetaTrader 4 skal være åbent og logget ind hos din broker
+• Smiley-ansigtet på chartet skal være synligt (ikke det røde "X")
+• Bruger du MetaTrader 5 i stedet? Se mt5_agent-mappen — den er
+  endnu nemmere fordi MT5 har en officiel Python-pakke.
+
+Hvis noget ikke virker:
+──────────────────────────
+• Tjek mt4_worker.log i denne mappe for fejlbeskeder
+• Tjek "Experts"-fanen i bunden af MetaTrader 4 for EA-logs
+• Sørg for "AutoTrading"-knappen i MT4's værktøjsbjælke er grøn
+
+Filer i denne mappe:
+──────────────────────
+  START.bat        — start her (dobbeltklik)
+  mt4_worker.py     — Python-broen (rør ikke ved den)
+  MT4_Bridge.mq4    — Expert Advisor-kildekode (kopieres automatisk)
+  .env              — dine indstillinger (oprettes automatisk)
+  mt4_worker.log    — logfil
+
+════════════════════════════════════════════════════════════

@@ -107,6 +107,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/recall <nøgle> — husk\n"
         "/brain — vis alt jeg ved om dig\n"
         "/forget <nøgle> — glem\n\n"
+        "*Trading*\n"
+        "/market — markedsovervågning + statistik\n"
+        "/trades — åbne trades\n"
+        "/trade SYMBOL long/short ENTRY sl=X tp=Y — log manuel trade\n"
+        "/close <id> <pris> — luk trade\n"
+        "/why <id> — se begrundelse for en trade\n"
+        "/watchlist — overvågede symboler\n"
+        "/scan — scan markedet nu\n"
+        "/broker [mt4|mt5|auto] — broker-forbindelse\n\n"
         "*System*\n"
         "/health — systemstatus\n"
         "/help — denne besked",
@@ -454,6 +463,184 @@ async def cmd_findleads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+# ── Trading commands ───────────────────────────────────────────────────────────
+
+async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        trades = await api_get("/trading/trades")
+        if not trades:
+            await update.message.reply_text("Ingen åbne trades.")
+            return
+        lines = [
+            f"• `{t['trade_id'][:14]}` {t['symbol']} {t['direction'].upper()} "
+            f"@ `{t['entry']}` SL:`{t['stop_loss']}` TP:`{t['take_profit']}`"
+            for t in trades[:15]
+        ]
+        await update.message.reply_text("*Åbne trades:*\n" + "\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if len(ctx.args) < 4:
+        await update.message.reply_text(
+            "Usage: /trade SYMBOL long ENTRY sl=X tp=Y [forex|stocks]\n"
+            "Eksempel: /trade EURUSD=X long 1.0850 sl=1.0800 tp=1.0950 forex"
+        )
+        return
+    try:
+        symbol, direction, entry_raw = ctx.args[0], ctx.args[1].lower(), ctx.args[2]
+        sl = tp = None
+        market = "forex"
+        for arg in ctx.args[3:]:
+            if arg.startswith("sl="):
+                sl = float(arg[3:])
+            elif arg.startswith("tp="):
+                tp = float(arg[3:])
+            elif arg in ("forex", "stocks"):
+                market = arg
+        if sl is None or tp is None:
+            await update.message.reply_text("Mangler sl= og/eller tp=")
+            return
+        data = await api_post("/trading/trades", {
+            "symbol": symbol, "market": market, "direction": direction,
+            "entry": float(entry_raw), "stop_loss": sl, "take_profit": tp,
+        })
+        await update.message.reply_text(
+            f"Trade logget.\nID: `{data['trade_id']}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if len(ctx.args) < 2:
+        await update.message.reply_text("Usage: /close <trade_id> <exit_price>")
+        return
+    try:
+        trade_id, exit_price = ctx.args[0], float(ctx.args[1])
+        data = await api_post(f"/trading/trades/{trade_id}/close?exit_price={exit_price}", {})
+        r = data.get("r_multiple", 0)
+        await update.message.reply_text(
+            f"{'✅' if r > 0 else '❌'} Trade lukket. R: `{r:+.2f}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_why(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /why <trade_id>")
+        return
+    try:
+        trade = await api_get(f"/trading/trades/{ctx.args[0]}")
+        reasoning = trade.get("reasoning", {})
+        if not reasoning:
+            await update.message.reply_text("Ingen begrundelse fundet for denne trade.")
+            return
+        cl = reasoning.get("checklist", {})
+        checklist_lines = "\n".join(f"{'✅' if v else '❌'} {k.replace('_',' ')}" for k, v in cl.items())
+        reasons = "\n".join(f"• {r}" for r in reasoning.get("reasons", [])[:8])
+        await update.message.reply_text(
+            f"*Begrundelse for {trade['symbol']}:*\n\n"
+            f"Confidence: `{reasoning.get('confidence',0)*100:.0f}%`\n"
+            f"Confluence: `{reasoning.get('confluence',0)}`\n"
+            f"Session: {reasoning.get('session','?')}\n"
+            f"Setups: {', '.join(reasoning.get('setups',[])) or '—'}\n\n"
+            f"*Checklist:*\n{checklist_lines}\n\n"
+            f"*Indikatorer:*\n{reasons}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        stats = await api_get("/trading/stats")
+        broker = await api_get("/trading/broker")
+        cfg = await api_get("/trading/config")
+        mt5_dot = "🟢" if broker.get("mt5_online") else "🔴"
+        mt4_dot = "🟢" if broker.get("mt4_online") else "🔴"
+        await update.message.reply_text(
+            f"*Markedsovervågning*\n"
+            f"Status: {'🟢 Kører' if cfg.get('running') else '🔴 Stoppet'}\n"
+            f"Forex: {len(cfg.get('forex',[]))} par · Stocks: {len(cfg.get('stocks',[]))} symboler\n\n"
+            f"*Broker forbindelse*\n"
+            f"{mt5_dot} MT5 · {mt4_dot} MT4\n"
+            f"Aktiv: `{broker.get('preferred','auto')}`\n\n"
+            f"*Statistik*\n"
+            f"Trades: {stats.get('total',0)} · Win rate: `{stats.get('win_rate',0)}%`\n"
+            f"Avg R: `{stats.get('avg_rr',0):+.2f}` · Total R: `{stats.get('total_r',0):+.2f}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        cfg = await api_get("/trading/config")
+        await update.message.reply_text(
+            f"*Forex:*\n{', '.join(cfg.get('forex',[]))}\n\n"
+            f"*Stocks/Indeks:*\n{', '.join(cfg.get('stocks',[]))}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        await api_post("/trading/scan-now", {})
+        await update.message.reply_text("Scanner markedet nu …")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_broker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    if not ctx.args:
+        try:
+            s = await api_get("/trading/broker")
+            await update.message.reply_text(
+                f"MT5: {'🟢 online' if s.get('mt5_online') else '🔴 offline'}\n"
+                f"MT4: {'🟢 online' if s.get('mt4_online') else '🔴 offline'}\n"
+                f"Foretrukket: `{s.get('preferred','auto')}`\n\n"
+                f"Skift med: /broker mt4 · /broker mt5 · /broker auto",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Fejl: {e}")
+        return
+    choice = ctx.args[0].lower()
+    if choice not in ("mt4", "mt5", "auto"):
+        await update.message.reply_text("Usage: /broker mt4|mt5|auto")
+        return
+    try:
+        await api_post("/trading/broker", {"broker": choice})
+        await update.message.reply_text(f"Foretrukken broker sat til: `{choice}`", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 # ── Free-text handler (full AI) ────────────────────────────────────────────────
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -550,11 +737,14 @@ async def listen_notifications(bot):
 
             if channel == "supervisor:notifications":
                 msg_text = data["message"]
-                await bot.send_message(
-                    chat_id=ALLOWED_CHAT_ID,
-                    text=f"[SYS] `{data.get('task_id','?')}`\n{msg_text}",
-                    parse_mode="Markdown",
-                )
+                task_id  = data.get("task_id", "?")
+                parse_mode = data.get("parse_mode", "Markdown")
+                # Trading/broker messages are already fully formatted — send as-is
+                if task_id.startswith(("trading", "trd_", "mt4_bridge", "mt5_bridge")):
+                    text = msg_text
+                else:
+                    text = f"[SYS] `{task_id}`\n{msg_text}"
+                await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=text, parse_mode=parse_mode)
 
             elif channel == "browser:screenshots":
                 task_id = data["task_id"]
@@ -609,6 +799,9 @@ async def main():
         ("remember", cmd_remember), ("recall", cmd_recall),
         ("brain", cmd_brain), ("forget", cmd_forget),
         ("lead", cmd_lead), ("findleads", cmd_findleads),
+        ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close),
+        ("why", cmd_why), ("market", cmd_market), ("watchlist", cmd_watchlist),
+        ("scan", cmd_scan), ("broker", cmd_broker),
     ]
     for name, handler in handlers:
         app.add_handler(CommandHandler(name, handler))

@@ -48,6 +48,7 @@ from core.memory.memory_manager import MemoryManager
 from core.goals.goal_engine import GoalEngine
 from core.memory.vault import SecureVault
 from core.memory.brain import Brain
+from core.trading.market_monitor import MarketMonitor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -62,11 +63,13 @@ memory: MemoryManager = None
 goal_engine: GoalEngine = None
 vault: SecureVault = None
 brain: Brain = None
+market_monitor: MarketMonitor = None
+positions = None
 
 
 @app.on_event("startup")
 async def startup():
-    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain
+    global redis_client, task_queue, supervisor, db, memory, goal_engine, vault, brain, market_monitor, positions
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
@@ -83,6 +86,11 @@ async def startup():
 
     supervisor = Supervisor(task_queue, db, redis_client, goal_engine, memory)
     asyncio.create_task(supervisor.run())
+
+    market_monitor = MarketMonitor(redis_client)
+    positions = market_monitor.positions
+    asyncio.create_task(market_monitor.run())
+
     log.info("API v2 started")
 
 
@@ -360,6 +368,116 @@ async def update_settings(s: SettingsUpdate):
     if data:
         await redis_client.hset(SETTINGS_KEY, mapping=data)
     return {"status": "saved", **data}
+
+
+# ── Trading endpoints ─────────────────────────────────────────────────────────
+
+class TradeRequest(BaseModel):
+    symbol: str
+    market: str = "forex"
+    direction: str
+    entry: float
+    stop_loss: float
+    take_profit: float
+
+
+class BrokerPreference(BaseModel):
+    broker: str  # "mt4", "mt5" or "auto"
+
+
+class WatchlistUpdate(BaseModel):
+    forex: Optional[list[str]] = None
+    stocks: Optional[list[str]] = None
+
+
+@app.post("/trading/trades")
+async def open_trade_manual(req: TradeRequest):
+    trade_id = await positions.open_trade(
+        symbol=req.symbol, market=req.market, direction=req.direction,
+        entry=req.entry, sl=req.stop_loss, tp=req.take_profit, source="manual",
+    )
+    return {"trade_id": trade_id, "status": "open"}
+
+
+@app.get("/trading/trades")
+async def list_open_trades():
+    return await positions.list_open()
+
+
+@app.get("/trading/trades/{trade_id}")
+async def get_trade(trade_id: str):
+    trade = await positions.get_trade(trade_id)
+    if not trade:
+        raise HTTPException(404, "Trade not found")
+    return trade
+
+
+@app.post("/trading/trades/{trade_id}/close")
+async def close_trade_manual(trade_id: str, exit_price: float):
+    result = await positions.close_trade(trade_id, exit_price, reason="manual")
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
+@app.get("/trading/history")
+async def trade_history(limit: int = 50):
+    return await positions.history(limit)
+
+
+@app.get("/trading/stats")
+async def trade_stats():
+    return await positions.stats()
+
+
+@app.get("/trading/journal")
+async def trade_journal(limit: int = 100):
+    raw = await redis_client.lrange("trading:journal", 0, limit - 1)
+    return [json.loads(r) for r in raw]
+
+
+@app.get("/trading/signals")
+async def recent_signals(limit: int = 30):
+    raw = await redis_client.lrange("trading:journal", 0, limit - 1)
+    entries = [json.loads(r) for r in raw]
+    return [e for e in entries if e.get("published")]
+
+
+@app.get("/trading/config")
+async def trading_config():
+    wl = await market_monitor.watchlist()
+    return {
+        "forex":   wl["forex"],
+        "stocks":  wl["stocks"],
+        "running": market_monitor._running if market_monitor else False,
+    }
+
+
+@app.post("/trading/config")
+async def update_trading_config(req: WatchlistUpdate):
+    if req.forex is not None:
+        await redis_client.set("trading:watchlist:forex", json.dumps(req.forex))
+    if req.stocks is not None:
+        await redis_client.set("trading:watchlist:stocks", json.dumps(req.stocks))
+    return await trading_config()
+
+
+@app.post("/trading/scan-now")
+async def scan_now():
+    if market_monitor:
+        asyncio.create_task(market_monitor._scan_all())
+    return {"status": "scanning"}
+
+
+@app.get("/trading/broker")
+async def broker_status():
+    return await market_monitor.broker.status()
+
+
+@app.post("/trading/broker")
+async def set_broker_preference(req: BrokerPreference):
+    await market_monitor.broker.set_preference(req.broker)
+    return await market_monitor.broker.status()
 
 
 # ── Screenshots ───────────────────────────────────────────────────────────────

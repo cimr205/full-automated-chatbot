@@ -1,0 +1,47 @@
+════════════════════════════════════════════════════════════
+  MT5 Bot Worker — Brugervejledning
+════════════════════════════════════════════════════════════
+
+Hvad er dette?
+──────────────
+Dette program forbinder din bot (der kører på Railway) til
+MetaTrader 5 på din computer, så den kan udføre rigtige
+handler automatisk.
+
+Sådan starter du:
+─────────────────
+1. Dobbeltklik på  START.bat
+
+Det er det hele. Første gang spørger den om din Railway
+Redis URL (se nedenfor). Derefter husker den det.
+
+Sådan finder du din Railway Redis URL:
+────────────────────────────────────────
+1. Gå til  railway.app  og log ind
+2. Klik på dit projekt
+3. Klik på Redis-tjenesten (den røde boks)
+4. Klik på fanebladet "Connect"
+5. Kopier URL'en der starter med  redis://default:...
+
+Hvad sker der derefter?
+──────────────────────────
+• Din Telegram-bot sender:  ✅ MT5 Worker tilkoblet
+• Fra nu af udføres handler automatisk i MetaTrader 5
+• Vinduet skal forblive åbent mens du trader
+• Hvis du lukker vinduet, stopper den automatiske udførelse
+  (din bot fortsætter med at analysere, men udfører ikke)
+
+Vigtigt:
+──────────
+• MetaTrader 5 skal være åbent og logget ind
+• Du skal have en aktiv konto hos din broker i MT5
+• Bruger du MetaTrader 4 i stedet? Se mt4_agent-mappen.
+
+Filer i denne mappe:
+──────────────────────
+  START.bat       — start her (dobbeltklik)
+  mt5_worker.py   — selve programmet (rør ikke ved det)
+  .env            — dine indstillinger (oprettes automatisk)
+  mt5_worker.log  — logfil (hvad der skete)
+
+════════════════════════════════════════════════════════════
