@@ -136,10 +136,17 @@ The system can also auto-scan Forex/XAUUSD and execute trades via a Windows
 MT5 terminal, with account-level risk protection so it never blows past a
 daily-loss or max-drawdown limit.
 
-**Setup:**
-1. Run `mt5_agent/mt5_worker.py` (via `START.bat`) on the Windows PC/VPS with MT5 logged in.
-   This worker must be **redeployed** (re-copied) whenever it changes — it now also reports
-   live account equity/balance and per-symbol contract data used for position sizing.
+**Setup — three ways to run the MT5 side, pick one:**
+1. **Railway (recommended, zero-touch)** — runs MT5 under Wine as a 4th Railway
+   service in the same project as your API/bot/Redis, with auto-login (no VPS,
+   no Windows PC, no manual steps after the one-time setup). See
+   `mt5_agent/RAILWAY_MT5_OPSAETNING.md`.
+2. **Your own Windows PC/VPS** — run `mt5_agent/mt5_worker.py` (via `START.bat`)
+   with MT5 logged in. Must be **redeployed** (re-copied) whenever it changes —
+   it now also reports live account equity/balance and per-symbol contract data
+   used for position sizing.
+3. **Free Linux VPS (Oracle Cloud Always Free)** — see `mt5_agent/OPSAET_GRATIS_VPS.md`
+   if you'd rather not add a 4th Railway service.
 2. Set the risk env vars in `.env` (see `.env.example`): `RISK_PER_TRADE_PCT`,
    `RISK_MAX_DAILY_LOSS_PCT`, `RISK_MAX_TOTAL_DRAWDOWN_PCT`, `SIGNAL_CONFIRM_BAND`.
 

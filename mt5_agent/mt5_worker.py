@@ -1,7 +1,11 @@
 """
-MT5 Worker — runs on your Windows PC alongside MetaTrader 5.
+MT5 Worker — runs alongside MetaTrader 5.
 
-Just double-click START.bat — it handles everything automatically.
+Two backends, picked via MT5_BACKEND in .env:
+  "native" (default) — Windows PC/VPS with the MetaTrader5 pip package.
+            Just double-click START.bat — it handles everything automatically.
+  "linux"            — a free Linux box (e.g. Oracle Cloud Always Free) running
+            MT5 under Wine + the mt5linux bridge. See OPSAET_GRATIS_VPS.md.
 """
 import asyncio
 import json
@@ -36,13 +40,30 @@ if not REDIS_URL:
     print("="*60 + "\n")
     sys.exit(1)
 
-try:
-    import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
-    log.info("MetaTrader5 pakke fundet ✓")
-except ImportError:
-    MT5_AVAILABLE = False
-    log.warning("MetaTrader5 pakke ikke installeret — kør START.bat igen")
+MT5_BACKEND = os.environ.get("MT5_BACKEND", "native").lower()   # "native" | "linux"
+
+if MT5_BACKEND == "linux":
+    # Gratis VPS-spor: MT5 kører under Wine, vi taler med det via mt5linux's
+    # RPyC-bro i stedet for at importere MetaTrader5 nativt (kræver Windows).
+    try:
+        from mt5linux import MetaTrader5 as _MT5Linux
+        mt5 = _MT5Linux(
+            host=os.environ.get("MT5_LINUX_HOST", "localhost"),
+            port=int(os.environ.get("MT5_LINUX_PORT", "18812")),
+        )
+        MT5_AVAILABLE = True
+        log.info("mt5linux-bro fundet ✓ (host=%s)", os.environ.get("MT5_LINUX_HOST", "localhost"))
+    except Exception as e:
+        MT5_AVAILABLE = False
+        log.warning("mt5linux-bro ikke tilgængelig (%s) — se OPSAET_GRATIS_VPS.md", e)
+else:
+    try:
+        import MetaTrader5 as mt5
+        MT5_AVAILABLE = True
+        log.info("MetaTrader5 pakke fundet ✓")
+    except ImportError:
+        MT5_AVAILABLE = False
+        log.warning("MetaTrader5 pakke ikke installeret — kør START.bat igen")
 
 
 # ── Symbol name mapping ───────────────────────────────────────────────────────
@@ -80,13 +101,35 @@ def to_mt5_symbol(yf_symbol: str) -> str:
     return SYMBOL_MAP.get(yf_symbol, yf_symbol.replace("=X", "").replace("^", ""))
 
 
+# ── Auto-login (used on the zero-touch Railway/linux backend) ────────────────
+MT5_LOGIN         = os.environ.get("MT5_LOGIN")
+MT5_PASSWORD      = os.environ.get("MT5_PASSWORD")
+MT5_SERVER        = os.environ.get("MT5_SERVER")
+MT5_TERMINAL_PATH = os.environ.get("MT5_TERMINAL_PATH")  # e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe
+
+
+def _initialize() -> bool:
+    """
+    initialize() also (re)launches and logs into the terminal if it isn't
+    already running — used so the Railway container can come up cold with
+    no manual login step. Native Windows setups with an already-open,
+    logged-in terminal keep working unchanged (no creds configured → bare call).
+    """
+    if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+        kwargs = {"login": int(MT5_LOGIN), "password": MT5_PASSWORD, "server": MT5_SERVER}
+        if MT5_TERMINAL_PATH:
+            kwargs["path"] = MT5_TERMINAL_PATH
+        return mt5.initialize(**kwargs)
+    return mt5.initialize()
+
+
 # ── MT5 execution ─────────────────────────────────────────────────────────────
 
 def mt5_open_trade(symbol: str, direction: str, volume: float,
                    sl: float, tp: float, comment: str = "") -> dict:
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
-    if not mt5.initialize():
+    if not _initialize():
         return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
 
     info = mt5.symbol_info(symbol)
@@ -138,7 +181,7 @@ def mt5_open_trade(symbol: str, direction: str, volume: float,
 def mt5_get_account_info() -> dict:
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
-    if not mt5.initialize():
+    if not _initialize():
         return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
 
     info = mt5.account_info()
@@ -157,7 +200,7 @@ def mt5_get_account_info() -> dict:
 def mt5_get_symbol_info(symbol: str) -> dict:
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
-    if not mt5.initialize():
+    if not _initialize():
         return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
 
     info = mt5.symbol_info(symbol)
@@ -184,7 +227,7 @@ def mt5_get_symbol_info(symbol: str) -> dict:
 def mt5_close_trade(ticket: int, symbol: str, direction: str, volume: float) -> dict:
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
-    if not mt5.initialize():
+    if not _initialize():
         return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
 
     tick = mt5.symbol_info_tick(symbol)
