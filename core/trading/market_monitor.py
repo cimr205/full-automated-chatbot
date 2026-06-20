@@ -18,6 +18,7 @@ from .mt5_bridge import MT5Bridge
 from .risk_manager import RiskManager
 from . import reporting
 from . import chart
+from . import learning
 
 log = logging.getLogger(__name__)
 
@@ -158,9 +159,14 @@ class MarketMonitor:
             log.info("[%s] Skipped — %s", symbol, lock_reason)
             return
 
+        # Learning gate — setups with a clearly bad real track record are blocked
+        setup_type = signal.get("setup_type")
+        if await learning.is_blocked(self._redis, setup_type):
+            log.info("[%s] Setup '%s' is blocked by learning — skipping", symbol, setup_type)
+            return
+
         # Borderline confidence — don't act on a single read. Require the
         # *next* scan to reproduce the same direction + setup before entering.
-        setup_type = signal.get("setup_type")
         if not await self._confirmed(symbol, direction, setup_type, confidence):
             log.info("[%s] Borderline signal (%.0f%%) — waiting for re-confirmation", symbol, confidence * 100)
             return

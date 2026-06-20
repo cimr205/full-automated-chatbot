@@ -168,7 +168,16 @@ daily-loss or max-drawdown limit.
 | `/risk` | Show equity, daily/total drawdown, and lock status |
 | `/unlock_risk` | Clear a tripped risk-lock after reviewing the account |
 | `/report daily` / `/report weekly` | Send a performance report now (also sent automatically once per day) |
+| `/lessons` | Win rate per setup type, and which ones the bot has stopped using after a bad track record |
 | `/watchlist` | View/edit the Forex + Stocks watchlists |
+
+**On "learning from mistakes":** there's no magic 98%-win-rate AI here — that's not a real
+thing any honest system can promise. What *is* real: every closed trade is tagged by setup
+type, and once a setup type has lost money over enough trades (`core/trading/learning.py`,
+5+ trades and <35% win rate by default), it's automatically blocked from auto-executing
+again until you review it. Open positions also get a live R-multiple status pushed to
+Telegram every ~60 seconds (as often as the price actually updates) — see `_send_status_digest`
+in `core/trading/position_manager.py`.
 
 ## Recovery
 

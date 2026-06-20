@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 
+from . import learning
+
 log = logging.getLogger(__name__)
 
 POSITIONS_KEY  = "trading:positions"          # Redis hash: trade_id → JSON
@@ -98,6 +100,12 @@ class PositionManager:
         await self._redis.lpush(HISTORY_KEY, json.dumps(trade))
         await self._redis.ltrim(HISTORY_KEY, 0, 999)
         log.info("Trade closed: %s %s @ %s  P&L: %.2fR", trade_id, reason, exit_price, pnl_r)
+
+        try:
+            await learning.record_outcome(self._redis, trade)
+        except Exception as e:
+            log.warning("Learning record failed: %s", e)
+
         return trade
 
     async def list_open(self) -> list[dict]:
@@ -155,16 +163,21 @@ class PositionManager:
         if not trades:
             return
 
-        import httpx
+        status_lines = []
         for trade in trades:
             symbol = trade["symbol"]
             try:
                 price = await self._get_current_price(symbol)
                 if not price:
                     continue
-                await self._evaluate_position(trade, price)
+                line = await self._evaluate_position(trade, price)
+                if line:
+                    status_lines.append(line)
             except Exception as e:
                 log.warning("[%s] position check: %s", symbol, e)
+
+        if status_lines:
+            await self._send_status_digest(status_lines)
 
     async def _get_current_price(self, symbol: str) -> float | None:
         import httpx
@@ -187,7 +200,7 @@ class PositionManager:
         except Exception:
             return None
 
-    async def _evaluate_position(self, trade: dict, price: float):
+    async def _evaluate_position(self, trade: dict, price: float) -> str | None:
         trade_id  = trade["trade_id"]
         entry     = trade["entry"]
         sl        = trade["stop_loss"]
@@ -200,7 +213,7 @@ class PositionManager:
         # Calculate risk unit
         risk = abs(entry - sl)
         if risk == 0:
-            return
+            return None
 
         if direction == "long":
             current_r = (price - entry) / risk
@@ -217,19 +230,28 @@ class PositionManager:
         if sl_hit:
             closed = await self.close_trade(trade_id, price, "stop_loss")
             await self._notify_close(closed, "🛑 Stop Loss ramt")
-            return
+            return None
 
         # TP hit — close trade
         if tp_hit:
             closed = await self.close_trade(trade_id, price, "take_profit")
             await self._notify_close(closed, "🎯 Take Profit ramt")
-            return
+            return None
 
         # Partial profit level hit — notify (user moves SL to BE manually)
         if partial_hit:
             trade["partial_taken"] = True
             await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
             await self._notify_partial(trade, price)
+
+        emoji = "🟢" if current_r >= 0 else "🔴"
+        return f"{emoji} *{symbol}* {direction.upper()}: {current_r:+.2f}R"
+
+    async def _send_status_digest(self, lines: list[str]):
+        msg = "⏱ *Live status — åbne trades*\n" + "\n".join(lines)
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": msg, "parse_mode": "Markdown", "task_id": "live_status",
+        }))
 
     async def _notify_close(self, trade: dict, reason: str):
         if not trade:

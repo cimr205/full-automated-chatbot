@@ -581,6 +581,28 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show win rate per setup type, and which ones the bot has stopped using."""
+    if not await auth(update):
+        return
+    try:
+        stats = await api_get("/trading/lessons")
+        if not stats:
+            await update.message.reply_text("Ingen lukkede trades endnu — ingen lektier at vise.")
+            return
+        lines = []
+        for setup, s in sorted(stats.items(), key=lambda kv: kv[1]["win_rate"]):
+            total = s["wins"] + s["losses"]
+            tag = "🚫 BLOKERET" if s.get("blocked") else "✅"
+            lines.append(f"{tag} *{setup}*: {s['win_rate']:.0%} win rate ({s['wins']}W/{s['losses']}L, {total} trades)")
+        await update.message.reply_text(
+            "🧠 *Lektier — win rate per setup-type*\n\n" + "\n".join(lines),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show all open trades."""
     if not await auth(update):
@@ -924,6 +946,7 @@ async def main():
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan),
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
+        ("lessons", cmd_lessons),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),

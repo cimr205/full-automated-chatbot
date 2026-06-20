@@ -51,6 +51,7 @@ from core.memory.brain import Brain
 from core.trading.market_monitor import MarketMonitor, DEFAULT_FOREX, DEFAULT_STOCKS
 from core.trading.position_manager import PositionManager
 from core.trading import reporting as trading_reporting
+from core.trading import learning as trading_learning
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -538,6 +539,11 @@ async def unlock_risk():
         raise HTTPException(503, "Market monitor not running")
     was_locked = await market_monitor.risk.unlock()
     return {"status": "unlocked" if was_locked else "was_not_locked"}
+
+
+@app.get("/trading/lessons")
+async def get_lessons():
+    return await trading_learning.all_stats(redis_client)
 
 
 @app.get("/trading/report")
