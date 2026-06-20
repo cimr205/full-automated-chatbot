@@ -3,12 +3,14 @@ Telegram Bot — Autonomous Execution System
 Full-featured digital twin: AI chat, vault, brain, tasks, goals, screenshots.
 """
 import asyncio
+import base64
 import json
 import logging
 import os
 import re
 import sys
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -834,7 +836,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def listen_notifications(bot):
     pubsub = redis_client.pubsub()
-    await pubsub.subscribe("supervisor:notifications", "browser:screenshots", "browser:progress")
+    await pubsub.subscribe("supervisor:notifications", "browser:screenshots", "browser:progress",
+                           "trading:charts")
     log.info("Notification listener started")
 
     async for message in pubsub.listen():
@@ -888,6 +891,17 @@ async def listen_notifications(bot):
                     f"_Stop med: /stop {task_id}_"
                 )
                 await _send_photo_or_text(bot, ALLOWED_CHAT_ID, screenshot_path, caption)
+
+            elif channel == "trading:charts":
+                image_b64 = data.get("image_b64", "")
+                caption   = data.get("caption", "📊 Watchlist-overblik")
+                if image_b64:
+                    image_bytes = base64.b64decode(image_b64)
+                    await bot.send_photo(
+                        chat_id=ALLOWED_CHAT_ID,
+                        photo=BytesIO(image_bytes),
+                        caption=caption,
+                    )
 
         except Exception as e:
             log.error("Notification error: %s", e)

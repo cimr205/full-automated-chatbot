@@ -3,6 +3,7 @@ Market Monitor — continuously scans Forex and Stock/Index symbols,
 generates high-confidence signals, and pushes Telegram alerts via Redis.
 """
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from .position_manager import PositionManager
 from .mt5_bridge import MT5Bridge
 from .risk_manager import RiskManager
 from . import reporting
+from . import chart
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ class MarketMonitor:
         self._redis    = redis
         self._running  = False
         self._last_signal: dict[str, dict] = {}
+        self._last_snapshot: dict[str, dict] = {}   # for the per-cycle watchlist chart
         self.positions = PositionManager(redis)
         self.mt5       = MT5Bridge(redis)
         self.risk      = RiskManager(redis, db=db)
@@ -106,6 +109,8 @@ class MarketMonitor:
                 log.warning("[%s] analyze error: %s", symbol, e)
             await asyncio.sleep(2)   # gentle rate limit
 
+        await self._send_watchlist_chart()
+
     async def _analyze(self, symbol: str, market: str):
         # Fetch 1h data (used as base + resampled to 4h)
         ohlcv_1h = await self._fetch(symbol, "1h")
@@ -120,6 +125,15 @@ class MarketMonitor:
 
         # Always journal the scan (even if signal is rejected)
         await self._journal(symbol, market, signal, published=False)
+
+        # Snapshot for the per-cycle watchlist overview chart (all symbols, not just signals)
+        self._last_snapshot[symbol] = {
+            "closes":       [c[4] for c in ohlcv_1h[-50:]],
+            "direction":    signal.get("direction", "neutral"),
+            "confidence":   signal.get("confidence", 0),
+            "rsi":          signal.get("rsi", 50),
+            "checklist_ok": signal.get("checklist_ok", False),
+        }
 
         direction  = signal["direction"]
         confidence = signal["confidence"]
@@ -407,6 +421,26 @@ class MarketMonitor:
         key   = f"trading:daily_signals:{today}"
         await self._redis.incr(key)
         await self._redis.expire(key, 86400 * 2)
+
+    # ── Watchlist overview chart ─────────────────────────────────────────────
+
+    async def _send_watchlist_chart(self):
+        """Sends one PNG overview of the whole watchlist's latest reads, once per scan cycle."""
+        if not self._last_snapshot:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            png_bytes = await loop.run_in_executor(
+                None, chart.render_watchlist_overview, dict(self._last_snapshot)
+            )
+            if not png_bytes:
+                return
+            await self._redis.publish("trading:charts", json.dumps({
+                "image_b64": base64.b64encode(png_bytes).decode("ascii"),
+                "caption": f"📊 Watchlist-overblik — {datetime.now(timezone.utc).strftime('%H:%M UTC')}",
+            }))
+        except Exception as e:
+            log.warning("Watchlist chart render/send failed: %s", e)
 
     # ── Risk / confirmation helpers ──────────────────────────────────────────
 
