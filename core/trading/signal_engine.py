@@ -22,9 +22,14 @@ MIN_RR         = 2.0    # reject trades with < 1:2 R:R
 
 # ── Session timing ────────────────────────────────────────────────────────────
 
-def session_info() -> dict:
-    """Current CET session. Prime = highest quality entries."""
-    hour = datetime.now(CET).hour
+def session_info(at: datetime | None = None) -> dict:
+    """
+    CET session for `at` (defaults to now — used live). Backtesting must pass
+    the candle's own timestamp here, otherwise every simulated candle gets
+    judged against the real wall-clock session instead of its own.
+    """
+    moment = at.astimezone(CET) if at else datetime.now(CET)
+    hour = moment.hour
     if 9 <= hour < 10:
         return {"name": "London Open",        "tradeable": True,  "prime": True}
     if 15 <= hour < 17:
@@ -210,17 +215,17 @@ def _score_timeframe(ohlcv: list) -> dict:
     else:
         votes.append((0, 1, f"Normal volumen ({vol_r:.1f}x)"))
 
-    total_w = sum(v[1] for v in votes)
     bull_w  = sum(v[1] for v in votes if v[0] > 0)
     bear_w  = sum(v[1] for v in votes if v[0] < 0)
+    decided_w = bull_w + bear_w   # excludes neutral votes — they aren't evidence against either side
 
     if bull_w > bear_w:
         direction  = "long"
-        confidence = bull_w / total_w
+        confidence = bull_w / decided_w
         reasons    = [v[2] for v in votes if v[0] > 0]
     elif bear_w > bull_w:
         direction  = "short"
-        confidence = bear_w / total_w
+        confidence = bear_w / decided_w
         reasons    = [v[2] for v in votes if v[0] < 0]
     else:
         direction  = "neutral"
@@ -241,6 +246,7 @@ def score_signal(
     ohlcv_1h:  list,
     ohlcv_4h:  list | None = None,
     ohlcv_1d:  list | None = None,
+    at:        datetime | None = None,   # backtesting: pass the candle's own timestamp
 ) -> dict:
     """
     Full multi-timeframe signal with setup detection, session check,
@@ -293,21 +299,26 @@ def score_signal(
     rr_ratio = abs(take_profit - price) / max(abs(stop_loss - price), 1e-10)
 
     # ── Setup detection on 1h (primary execution timeframe) ──
-    setups = []
+    # "type" is a stable category (e.g. "bullish_fvg") used for grouping/learning;
+    # "label" is the human-readable string with the specific price levels for display.
+    setups      = []   # display labels
+    setup_kinds = []   # stable categories
     for detector in (detect_fvg, detect_break_retest, detect_liquidity_grab, detect_trend_pullback):
         result = detector(ohlcv_1h)
         if result:
             expected = "long" if "bullish" in result["type"] else "short"
             if expected == direction:
                 setups.append(result["label"])
+                setup_kinds.append(result["type"])
 
-    setup_type = setups[0] if setups else None
+    setup_type  = setup_kinds[0] if setup_kinds else None
+    setup_label = setups[0] if setups else None
 
     # ── Confluence count ──
     confluence = len(all_reasons) + len(setups)
 
     # ── Session ──
-    sess = session_info()
+    sess = session_info(at)
 
     # ── 8-point pre-trade checklist ──
     checklist = {
@@ -332,6 +343,7 @@ def score_signal(
         "reasons":      all_reasons,
         "setups":       setups,
         "setup_type":   setup_type,
+        "setup_label":  setup_label,
         "price":        price,
         "stop_loss":    stop_loss,
         "take_profit":  take_profit,

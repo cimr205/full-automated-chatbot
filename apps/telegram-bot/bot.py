@@ -581,6 +581,43 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Measure the real historical win rate for a symbol: /backtest EURUSD=X"""
+    if not await auth(update):
+        return
+    symbol = ctx.args[0] if ctx.args else "EURUSD=X"
+    await update.message.reply_text(f"⏳ Backtester {symbol} mod ~2 års historik — kan tage et minut...")
+    try:
+        result = await api_get(f"/trading/backtest?symbol={symbol}")
+        if "error" in result:
+            await update.message.reply_text(f"Fejl: {result['error']}")
+            return
+        overall = result["overall"]
+        lines = [
+            f"📐 *Backtest — {result['symbol']}* ({result['candles']} candles)\n",
+            f"Samlet: {overall['total']} trades, {overall['win_rate']:.0%} win rate, "
+            f"{overall['total_r']:+.1f}R samlet, {overall['avg_r']:+.2f}R/trade\n",
+        ]
+        for setup, s in sorted(result["by_setup"].items(), key=lambda kv: -kv[1]["total"]):
+            lines.append(f"  • *{setup}*: {s['win_rate']:.0%} win rate ({s['total']} trades)")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_seed_learning(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Pre-load the learning system with backtested history across the watchlist."""
+    if not await auth(update):
+        return
+    await update.message.reply_text("⏳ Backtester hele watchlisten og forhåndsudfylder lærings-systemet...")
+    try:
+        res = await api_post("/trading/seed-learning", {}, timeout=120)
+        n = len(res.get("results", {}))
+        await update.message.reply_text(f"✅ Forhåndsudfyldt med historik fra {n} symboler. Se /lessons.")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show win rate per setup type, and which ones the bot has stopped using."""
     if not await auth(update):
@@ -741,7 +778,7 @@ async def cmd_why(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🔍 *Grundlag for {trade['symbol']} {trade['direction'].upper()}*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📐 Setup: {r.get('setup') or 'Ukendt'}\n"
+            f"📐 Setup: {r.get('setup_label') or r.get('setup') or 'Ukendt'}\n"
             f"🕐 Session: {r.get('session') or 'Ukendt'}\n"
             f"📊 Confidence: {(r.get('confidence') or 0):.0%}\n"
             f"🔗 Confluence: {r.get('confluence') or 0} faktorer\n"
@@ -946,7 +983,7 @@ async def main():
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan),
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
-        ("lessons", cmd_lessons),
+        ("lessons", cmd_lessons), ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),

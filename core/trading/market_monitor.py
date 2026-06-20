@@ -36,7 +36,7 @@ DEFAULT_FOREX = [
     "AUDUSD=X", "USDCHF=X", "USDCAD=X", "EURGBP=X",
     "EURJPY=X", "NZDUSD=X", "AUDJPY=X", "NZDJPY=X",
     "EURAUD=X", "GBPAUD=X", "AUDNZD=X", "CHFJPY=X", "CADJPY=X",
-    "XAUUSD=X",
+    "GC=F",   # Gold futures — Yahoo has no "XAUUSD=X"; this is the real, working ticker
 ]
 DEFAULT_STOCKS = [
     "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
@@ -287,6 +287,7 @@ class MarketMonitor:
         reasons    = signal.get("reasons",     [])
         setups     = signal.get("setups",      [])
         setup_type = signal.get("setup_type")
+        setup_label = signal.get("setup_label") or setup_type
         session    = signal.get("session",     {})
         confluence = signal.get("confluence",  0)
         checklist  = signal.get("checklist",   {})
@@ -311,7 +312,7 @@ class MarketMonitor:
             "5_risk_1_2_pct":     "Max 1-2% risiko",
             "6_not_chasing":      "Ikke chasing",
             "7_active_session":   f"Aktiv session ({sess_name}{prime_tag})",
-            "8_setup_identified": f"Setup: {setup_type or 'ingen'}",
+            "8_setup_identified": f"Setup: {setup_label or 'ingen'}",
         }
         cl_lines = [
             f"  {'✅' if checklist.get(k) else '❌'} {label}"
@@ -365,7 +366,7 @@ class MarketMonitor:
         tp         = signal["take_profit"]
         partial_tp = signal.get("partial_tp", 0)
         rr         = signal.get("rr_ratio", 0)
-        setup      = signal.get("setup_type", "Signal-baseret")
+        setup      = signal.get("setup_label") or signal.get("setup_type", "Signal-baseret")
         session    = signal.get("session", {}).get("name", "")
         reasons    = signal.get("reasons", [])[:4]
 

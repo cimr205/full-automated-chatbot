@@ -169,7 +169,20 @@ daily-loss or max-drawdown limit.
 | `/unlock_risk` | Clear a tripped risk-lock after reviewing the account |
 | `/report daily` / `/report weekly` | Send a performance report now (also sent automatically once per day) |
 | `/lessons` | Win rate per setup type, and which ones the bot has stopped using after a bad track record |
+| `/backtest <symbol>` | Measure the real historical win rate for a symbol (e.g. `/backtest EURUSD=X`) against ~2 years of data |
+| `/seed_learning` | Pre-load `/lessons` with backtested history across the whole watchlist, instead of waiting for 5+ live trades per setup |
 | `/watchlist` | View/edit the Forex + Stocks watchlists |
+
+**Backtested baseline (as of this writing, EURUSD/Gold, ~2yr 1h data):** ~32-33% win rate,
+roughly breakeven-to-slightly-negative expectancy at the current 1:2 R:R. Per-setup it's
+uneven — e.g. `bullish_pullback` was the strongest setup on EURUSD (56% win rate) but one of
+the weakest on Gold (22%), and vice versa for `bullish_fvg`. This is exactly why the
+per-setup learning/blocking exists — run `/backtest` yourself before trusting any of this
+on a live account, numbers drift as markets change.
+
+**Known limitation:** `/lessons` blocking is currently global per setup type, not
+per-symbol — a setup performing well on one instrument and badly on another will be
+judged on its combined track record. Worth revisiting if you trade a wide watchlist.
 
 **On "learning from mistakes":** there's no magic 98%-win-rate AI here — that's not a real
 thing any honest system can promise. What *is* real: every closed trade is tagged by setup

@@ -52,6 +52,7 @@ from core.trading.market_monitor import MarketMonitor, DEFAULT_FOREX, DEFAULT_ST
 from core.trading.position_manager import PositionManager
 from core.trading import reporting as trading_reporting
 from core.trading import learning as trading_learning
+from core.trading import backtest as trading_backtest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -544,6 +545,21 @@ async def unlock_risk():
 @app.get("/trading/lessons")
 async def get_lessons():
     return await trading_learning.all_stats(redis_client)
+
+
+@app.get("/trading/backtest")
+async def backtest_symbol(symbol: str = "EURUSD=X"):
+    return await trading_backtest.run_backtest(symbol)
+
+
+@app.post("/trading/seed-learning")
+async def seed_learning():
+    forex_raw  = await redis_client.get("trading:watchlist:forex")
+    stocks_raw = await redis_client.get("trading:watchlist:stocks")
+    symbols = (forex_raw.split(",") if forex_raw else DEFAULT_FOREX) + \
+              (stocks_raw.split(",") if stocks_raw else DEFAULT_STOCKS)
+    seeded = await trading_backtest.seed_learning(redis_client, [s.strip() for s in symbols if s.strip()])
+    return {"status": "seeded", "results": seeded}
 
 
 @app.get("/trading/report")

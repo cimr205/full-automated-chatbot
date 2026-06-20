@@ -85,8 +85,8 @@ SYMBOL_MAP = {
     "AUDNZD=X": "AUDNZD",
     "CHFJPY=X": "CHFJPY",
     "CADJPY=X": "CADJPY",
-    "XAUUSD=X": "XAUUSD",
-    "XAGUSD=X": "XAGUSD",
+    "GC=F": "XAUUSD",   # Yahoo gold futures ticker → broker's gold spot symbol
+    "SI=F": "XAGUSD",   # Yahoo silver futures ticker → broker's silver spot symbol
     "SPY":   "US500",
     "QQQ":   "US100",
     "^GSPC": "US500",

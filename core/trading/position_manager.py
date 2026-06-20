@@ -61,6 +61,8 @@ class PositionManager:
             # Reasoning — persisted so user can ask "why did you enter?"
             "reasoning": {
                 "setup":      signal_data.get("setup_type")  if signal_data else None,
+                "setup_label": (signal_data.get("setup_label") or signal_data.get("setup_type"))
+                               if signal_data else None,
                 "session":    signal_data.get("session")     if signal_data else None,
                 "confidence": signal_data.get("confidence")  if signal_data else None,
                 "confluence": signal_data.get("confluence")  if signal_data else None,
