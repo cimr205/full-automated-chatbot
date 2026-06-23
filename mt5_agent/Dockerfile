@@ -22,7 +22,7 @@ ENV WINEDLLOVERRIDES="mscoree=d;mshtml=d"
 RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      winetricks xvfb wget ca-certificates cabextract unzip gnupg \
+      xvfb wget ca-certificates cabextract unzip gnupg \
       python3 python3-pip \
  && mkdir -p /etc/apt/keyrings \
  && wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key \
@@ -42,10 +42,15 @@ WORKDIR /app
 RUN xvfb-run -a sh -c "timeout 120 wineboot --init; wineserver -w; exit 0"
 
 # Visual C++ runtime — the MT5 terminal needs this to launch under Wine.
-# --force skips winetricks' bundled sha256 check, which goes stale whenever
-# Microsoft rotates the redistributable file out from under the cached hash.
-# timeout ensures a hung GUI installer fails the build instead of stalling it.
-RUN xvfb-run -a sh -c "timeout 300 winetricks --force -q vcrun2019 corefonts; rc=\$?; wineserver -w; exit \$rc"
+# Installed directly from Microsoft instead of via winetricks: winetricks'
+# own internal sanity check (resolving %AppData% through wine cmd.exe) fails
+# in this environment and aborts before it even attempts the install, even
+# though the Wine prefix itself is fully initialized. The redistributable's
+# own /quiet /install flags don't need that check at all.
+RUN wget -q -O /tmp/vc_redist.x64.exe \
+      https://aka.ms/vs/16/release/vc_redist.x64.exe \
+ && xvfb-run -a sh -c "timeout 180 wine /tmp/vc_redist.x64.exe /quiet /install /norestart; rc=\$?; wineserver -w; exit \$rc" \
+ && rm /tmp/vc_redist.x64.exe
 
 # Windows Python (inside Wine) — MetaTrader5 pip package only works on Windows Python
 RUN wget -q -O /tmp/python-installer.exe \
