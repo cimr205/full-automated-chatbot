@@ -36,17 +36,20 @@ RUN apt-get update \
  && wget -q -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends wine-stable-amd64 \
- && rm -rf /var/lib/apt/lists/* \
- && dpkg -L wine-stable-amd64 > /tmp/wine-files.txt \
- && echo "=== all files containing 'bin/' ===" \
- && (grep "bin/" /tmp/wine-files.txt || echo "(none)") \
- && echo "=== all files containing 'wine' ===" \
- && (grep -i "wine" /tmp/wine-files.txt || echo "(none)") \
- && for bin in wine64 wine wineboot wineserver; do \
+ && rm -rf /var/lib/apt/lists/*
+
+# Separate, unchained diagnostic steps — each one's full output must appear
+# in the build log on its own, so a previous attempt's combined/masked
+# command can't hide what's actually in this package.
+RUN dpkg -L wine-stable-amd64 > /tmp/wine-files.txt
+RUN cat /tmp/wine-files.txt
+RUN grep -i wine /tmp/wine-files.txt > /tmp/wine-grep.txt; cat /tmp/wine-grep.txt
+RUN bash -c 'for bin in wine64 wine wineboot wineserver; do \
       path=$(grep -E "/$bin\$" /tmp/wine-files.txt | head -1); \
-      if [ -n "$path" ]; then ln -sf "$path" /usr/bin/$bin; echo "linked $bin -> $path"; fi; \
-    done \
- && ls -la /usr/bin/wine* 2>/dev/null || echo "no /usr/bin/wine* symlinks created"
+      echo "candidate for $bin: $path"; \
+      if [ -n "$path" ]; then ln -sf "$path" /usr/bin/$bin; fi; \
+    done'
+RUN ls -la /usr/bin/ | grep -i wine
 
 WORKDIR /app
 
