@@ -53,6 +53,7 @@ from core.trading.position_manager import PositionManager
 from core.trading import reporting as trading_reporting
 from core.trading import learning as trading_learning
 from core.trading import backtest as trading_backtest
+from core.trading import optimize as trading_optimize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -574,6 +575,38 @@ async def get_lessons():
 @app.get("/trading/backtest")
 async def backtest_symbol(symbol: str = "EURUSD=X"):
     return await trading_backtest.run_backtest(symbol)
+
+
+@app.post("/trading/optimize")
+async def trigger_optimize():
+    """Kicks off the parameter sweep in the background — takes 45-60 min,
+    result comes back via Telegram, not in this response."""
+    asyncio.create_task(_run_optimize_and_notify())
+    return {"status": "started", "note": "Tager 45-60 minutter — resultatet kommer på Telegram."}
+
+
+async def _run_optimize_and_notify():
+    try:
+        result = await trading_optimize.run_sweep()
+        lines = [
+            f"🧪 *Parameter-optimering færdig*\n"
+            f"{result['combinations_tested']} kombinationer testet på "
+            f"{len(result['symbols_tested'])} symboler\n"
+        ]
+        for i, r in enumerate(result["top_10"][:5], 1):
+            lines.append(
+                f"{i}. conf≥{r['confidence_thresh']:.2f} confl≥{r['MIN_CONFLUENCE']} "
+                f"SL={r['ATR_SL_MULT']}x TP={r['ATR_TP_MULT']}x RR≥{r['MIN_RR']} "
+                f"→ {r['win_rate']:.0%} WR, {r['avg_r']:+.2f}R/trade ({r['total_trades']} trades)"
+            )
+        await redis_client.publish("supervisor:notifications", json.dumps({
+            "message": "\n".join(lines), "parse_mode": "Markdown", "task_id": "optimize_done",
+        }))
+    except Exception as e:
+        await redis_client.publish("supervisor:notifications", json.dumps({
+            "message": f"❌ Parameter-optimering fejlede: {e}",
+            "parse_mode": "Markdown", "task_id": "optimize_failed",
+        }))
 
 
 @app.post("/trading/seed-learning")

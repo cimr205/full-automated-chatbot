@@ -628,6 +628,23 @@ async def cmd_seed_learning(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Run a parameter sweep against real history to find a better-performing
+    configuration. Takes 45-60 min — result comes back as a separate message."""
+    if not await auth(update):
+        return
+    try:
+        await api_post("/trading/optimize", {})
+        await update.message.reply_text(
+            "🧪 Parameter-optimering startet — tager 45-60 minutter. "
+            "Du får en besked her når den er færdig med de bedste fundne indstillinger.\n\n"
+            "_Rør ikke ved risikostyringen — kun signal-tærskler testes._",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show win rate per setup type, and which ones the bot has stopped using."""
     if not await auth(update):
@@ -1011,6 +1028,7 @@ async def main():
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
         ("lessons", cmd_lessons), ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
+        ("optimize", cmd_optimize),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),

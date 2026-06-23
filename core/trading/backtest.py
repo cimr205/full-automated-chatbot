@@ -80,11 +80,13 @@ def _simulate_exit(ohlcv: list, start_idx: int, direction: str,
     return None
 
 
-async def run_backtest(symbol: str, range_: str = "730d") -> dict:
-    ohlcv = await fetch_history(symbol, "1h", range_)
-    if len(ohlcv) < WINDOW + 10:
-        return {"error": f"Ikke nok historik for {symbol} ({len(ohlcv)} candles)"}
-
+def simulate(ohlcv: list, confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
+    """
+    The actual backtest loop, separated from data-fetching so a parameter
+    sweep (see optimize.py) can fetch each symbol's history once and replay
+    it many times with different thresholds — without re-hitting Yahoo
+    Finance for every combination.
+    """
     by_setup = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
     overall  = {"wins": 0, "losses": 0, "total_r": 0.0, "skipped_no_exit": 0}
 
@@ -95,7 +97,7 @@ async def run_backtest(symbol: str, range_: str = "730d") -> dict:
         signal = score_signal(window, _resample_4h(window), None, at=candle_time)
 
         if (signal["direction"] != "neutral" and signal.get("checklist_ok")
-                and signal["confidence"] >= CONFIDENCE_THRESH):
+                and signal["confidence"] >= confidence_thresh):
             setup = signal.get("setup_type") or "unknown"
             pnl_r = _simulate_exit(ohlcv, i, signal["direction"],
                                    signal["price"], signal["stop_loss"], signal["take_profit"])
@@ -124,11 +126,17 @@ async def run_backtest(symbol: str, range_: str = "730d") -> dict:
                 "avg_r":    b["total_r"] / total if total else 0}
 
     return {
-        "symbol":  symbol,
-        "candles": len(ohlcv),
         "overall": _finish(overall),
         "by_setup": {k: _finish(v) for k, v in by_setup.items()},
     }
+
+
+async def run_backtest(symbol: str, range_: str = "730d", confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
+    ohlcv = await fetch_history(symbol, "1h", range_)
+    if len(ohlcv) < WINDOW + 10:
+        return {"error": f"Ikke nok historik for {symbol} ({len(ohlcv)} candles)"}
+    result = simulate(ohlcv, confidence_thresh=confidence_thresh)
+    return {"symbol": symbol, "candles": len(ohlcv), **result}
 
 
 async def seed_learning(redis, symbols: list[str]) -> dict:

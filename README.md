@@ -174,12 +174,16 @@ daily-loss or max-drawdown limit.
 | `/seed_learning` | Pre-load `/lessons` with backtested history across the whole watchlist, instead of waiting for 5+ live trades per setup |
 | `/watchlist` | View/edit the Forex + Stocks watchlists |
 
-**Backtested baseline (as of this writing, EURUSD/Gold, ~2yr 1h data):** ~32-33% win rate,
-roughly breakeven-to-slightly-negative expectancy at the current 1:2 R:R. Per-setup it's
-uneven — e.g. `bullish_pullback` was the strongest setup on EURUSD (56% win rate) but one of
-the weakest on Gold (22%), and vice versa for `bullish_fvg`. This is exactly why the
-per-setup learning/blocking exists — run `/backtest` yourself before trusting any of this
-on a live account, numbers drift as markets change.
+**Backtested baseline (as of this writing, ~2yr 1h data, default params):** after FVG and
+Break & Retest setups switched to limit orders at the actual setup level instead of chasing
+market price (see below), win rate jumped from an earlier-measured ~32-33% to **52-66% on
+major forex pairs** (EURUSD 66%, GBPUSD 60%, GBPJPY 54%, USDJPY 52%), all with positive
+expectancy. Gold lags at **38%** — still positive (avg +0.14R/trade) but the weakest of the
+basket. `core/trading/optimize.py` runs a parameter sweep (confidence threshold, confluence
+requirement, SL/TP multipliers) against real history to find better-performing
+configurations — it does **not** touch risk management (sizing/daily-loss lock/stop loss),
+only which setups the signal engine treats as good enough to act on. Numbers drift as
+markets change — run `/backtest` yourself before trusting any of this on a live account.
 
 **Known limitation:** `/lessons` blocking is currently global per setup type, not
 per-symbol — a setup performing well on one instrument and badly on another will be
