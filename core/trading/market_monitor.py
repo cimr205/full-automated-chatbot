@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone, time as dtime
 
 import httpx
@@ -223,8 +224,46 @@ class MarketMonitor:
         order_type  = signal.get("order_type", "market")
         limit_price = signal.get("limit_price") or 0
 
-        # Log position in Redis (always) — "pending" status if it's a limit order
-        trade_id = await self.positions.open_trade(
+        # MT5 execution happens FIRST. The local trade record and the
+        # "trade opened" Telegram message only get created on confirmed
+        # success — never claim a trade exists when MT5 never placed it.
+        mt5_online = await self.mt5.ping()
+        if not mt5_online:
+            await self._notify_mt5_not_executed(
+                symbol, signal, "MT5 Worker er offline — ingen rigtig trade blev åbnet."
+            )
+            await self._journal(symbol, market, signal, published=False)
+            return
+
+        trade_id = f"trade_{uuid.uuid4().hex[:8]}"
+        try:
+            volume = await self._sized_volume(symbol, signal["price"], signal["stop_loss"])
+            mt5_result = await self.mt5.send_open(
+                trade_id=trade_id,
+                symbol=symbol,
+                direction=direction,
+                stop_loss=signal["stop_loss"],
+                take_profit=signal["take_profit"],
+                volume=volume or 0,
+                order_type=order_type,
+                limit_price=limit_price,
+            )
+        except Exception as e:
+            mt5_result = {"error": str(e)}
+
+        if "error" in mt5_result:
+            log.warning("MT5 execution failed: %s", mt5_result["error"])
+            await self._notify_mt5_not_executed(
+                symbol, signal, f"MT5 afviste ordren: {mt5_result['error']}"
+            )
+            await self._journal(symbol, market, signal, published=False)
+            return
+
+        log.info("MT5 order placed: ticket=%s vol=%s type=%s",
+                 mt5_result.get("ticket"), volume, order_type)
+
+        # Only now — confirmed real execution — record it and notify.
+        await self.positions.open_trade(
             symbol=symbol, market=market,
             direction=direction,
             entry=signal["price"],
@@ -234,31 +273,8 @@ class MarketMonitor:
             signal_data=signal,
             source="auto",
             order_type=order_type,
+            trade_id=trade_id,
         )
-
-        # Execute in MT5 if worker is online (optional — works without it)
-        try:
-            mt5_online = await self.mt5.ping()
-            if mt5_online:
-                volume = await self._sized_volume(symbol, signal["price"], signal["stop_loss"])
-                mt5_result = await self.mt5.send_open(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    direction=direction,
-                    stop_loss=signal["stop_loss"],
-                    take_profit=signal["take_profit"],
-                    volume=volume or 0,
-                    order_type=order_type,
-                    limit_price=limit_price,
-                )
-                if "error" in mt5_result:
-                    log.warning("MT5 execution failed: %s", mt5_result["error"])
-                else:
-                    log.info("MT5 order placed: ticket=%s vol=%s type=%s",
-                             mt5_result.get("ticket"), volume, order_type)
-        except Exception as e:
-            log.warning("MT5 execution error (non-fatal): %s", e)
-
         await self._notify_trade_open(trade_id, symbol, signal)
         await self._journal(symbol, market, signal, published=True)
         await self._increment_daily_count()
@@ -443,6 +459,22 @@ class MarketMonitor:
         await self._redis.publish("supervisor:notifications", json.dumps({
             "message": msg, "parse_mode": "Markdown",
             "task_id": f"trade_open_{trade_id}",
+        }))
+
+    async def _notify_mt5_not_executed(self, symbol: str, signal: dict, reason: str):
+        """A signal qualified but no real broker order was placed — say so
+        explicitly. Never let the bot claim a trade exists when it doesn't."""
+        direction = signal.get("direction", "?").upper()
+        msg = (
+            f"⚠️ *SIGNAL FUNDET — IKKE UDFØRT*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"*{symbol}*  {direction}\n"
+            f"{reason}\n\n"
+            f"_Ingen trade er åbnet på din konto. Botten fortsætter med at scanne._"
+        )
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": msg, "parse_mode": "Markdown",
+            "task_id": f"mt5_not_executed_{symbol}",
         }))
 
     async def _journal(self, symbol: str, market: str, signal: dict, published: bool):

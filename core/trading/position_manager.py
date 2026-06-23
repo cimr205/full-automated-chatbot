@@ -42,8 +42,9 @@ class PositionManager:
         signal_data: dict   = None,     # full signal dict for reasoning
         source:     str     = "auto",   # "auto" | "manual"
         order_type: str     = "market", # "market" | "limit"
+        trade_id:   str     = None,     # supply when MT5 needs the same ID for correlation
     ) -> str:
-        trade_id = f"trade_{uuid.uuid4().hex[:8]}"
+        trade_id = trade_id or f"trade_{uuid.uuid4().hex[:8]}"
         trade = {
             "trade_id":   trade_id,
             "symbol":     symbol,
