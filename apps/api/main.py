@@ -507,6 +507,22 @@ async def close_trade(trade_id: str, exit_price: float):
     return trade
 
 
+@app.post("/trading/trades/{trade_id}/cancel")
+async def cancel_pending_trade(trade_id: str):
+    trade = await positions.get_trade(trade_id)
+    if not trade:
+        raise HTTPException(404, "Trade not found")
+    if trade.get("status") != "pending":
+        raise HTTPException(400, "Trade is not a pending limit order")
+    ticket_raw = await redis_client.hget("trading:mt5:tickets", trade_id)
+    if ticket_raw and market_monitor:
+        ticket = json.loads(ticket_raw).get("ticket")
+        if ticket:
+            await market_monitor.mt5.cancel_pending(ticket)
+    cancelled = await positions.cancel_pending(trade_id, reason="manuelt annulleret")
+    return cancelled
+
+
 @app.get("/trading/history")
 async def trade_history(limit: int = 50):
     return await positions.history(limit)

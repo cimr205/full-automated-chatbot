@@ -77,7 +77,8 @@ class MT5Bridge:
                         else:
                             log.error("MT5 close failed: %s", result.get("error"))
 
-                    elif command in ("get_account_info", "get_symbol_info"):
+                    elif command in ("get_account_info", "get_symbol_info",
+                                     "check_pending", "cancel_pending"):
                         trade_id = data.get("trade_id")
                         result   = data.get("result", {})
                         if trade_id and trade_id in self._pending:
@@ -94,21 +95,25 @@ class MT5Bridge:
 
     async def send_open(self, trade_id: str, symbol: str, direction: str,
                         stop_loss: float, take_profit: float,
-                        volume: float = 0) -> dict:
-        """Send open order to MT5 worker. Returns result dict."""
+                        volume: float = 0, order_type: str = "market",
+                        limit_price: float = 0) -> dict:
+        """Send open order to MT5 worker. order_type "market" or "limit"
+        (pending order at limit_price — sits until filled or cancelled)."""
         if not volume:
             raw = await self._redis.get("trading:lot_size")
             volume = float(raw) if raw else 0.01
 
         cmd = {
-            "command":    "open",
-            "trade_id":   trade_id,
-            "symbol":     symbol,
-            "direction":  direction,
-            "volume":     volume,
-            "stop_loss":  stop_loss,
+            "command":     "open",
+            "trade_id":    trade_id,
+            "symbol":      symbol,
+            "direction":   direction,
+            "volume":      volume,
+            "stop_loss":   stop_loss,
             "take_profit": take_profit,
-            "ts":         datetime.utcnow().isoformat(),
+            "order_type":  order_type,
+            "limit_price": limit_price,
+            "ts":          datetime.utcnow().isoformat(),
         }
 
         fut = asyncio.get_event_loop().create_future()
@@ -121,6 +126,38 @@ class MT5Bridge:
             self._pending.pop(trade_id, None)
             log.warning("MT5 open timeout for %s — is mt5_worker.py running?", trade_id)
             return {"error": "timeout — er MT5 Worker kørende på din PC?"}
+
+    async def check_pending(self, ticket: int) -> dict:
+        """Poll a pending limit order's status: pending / filled / cancelled."""
+        req_id = f"chk_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "check_pending", "trade_id": req_id, "ticket": ticket,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout"}
+
+    async def cancel_pending(self, ticket: int) -> dict:
+        """Cancel a pending limit order that hasn't filled yet."""
+        req_id = f"cnl_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "cancel_pending", "trade_id": req_id, "ticket": ticket,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout"}
 
     async def send_close(self, trade_id: str, symbol: str, direction: str,
                          volume: float = 0.01) -> dict:

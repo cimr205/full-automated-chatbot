@@ -41,6 +41,7 @@ class PositionManager:
         size:       float   = 0,        # 0 = not specified
         signal_data: dict   = None,     # full signal dict for reasoning
         source:     str     = "auto",   # "auto" | "manual"
+        order_type: str     = "market", # "market" | "limit"
     ) -> str:
         trade_id = f"trade_{uuid.uuid4().hex[:8]}"
         trade = {
@@ -53,7 +54,11 @@ class PositionManager:
             "take_profit": take_profit,
             "partial_tp": partial_tp,
             "size":       size,
-            "status":     "open",
+            # "pending" = limit order placed but not yet filled — not monitored
+            # for SL/TP until it actually opens. No auto-expiry; stays until
+            # filled or manually cancelled via /cancel.
+            "status":     "pending" if order_type == "limit" else "open",
+            "order_type": order_type,
             "source":     source,
             "opened_at":  datetime.utcnow().isoformat(),
             "pnl_r":      0.0,
@@ -124,6 +129,34 @@ class PositionManager:
         raw = await self._redis.hget(POSITIONS_KEY, trade_id)
         return json.loads(raw) if raw else None
 
+    async def list_pending(self) -> list[dict]:
+        return [t for t in await self.list_open() if t.get("status") == "pending"]
+
+    async def mark_filled(self, trade_id: str, fill_price: float) -> dict | None:
+        """A pending limit order got filled — it's now a real open position."""
+        raw = await self._redis.hget(POSITIONS_KEY, trade_id)
+        if not raw:
+            return None
+        trade = json.loads(raw)
+        trade["status"]    = "open"
+        trade["entry"]     = fill_price
+        trade["filled_at"] = datetime.utcnow().isoformat()
+        await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
+        log.info("Pending order filled: %s @ %s", trade_id, fill_price)
+        await self._notify_filled(trade)
+        return trade
+
+    async def cancel_pending(self, trade_id: str, reason: str = "cancelled") -> dict | None:
+        """A pending limit order was cancelled/expired before filling — never became a real trade."""
+        raw = await self._redis.hget(POSITIONS_KEY, trade_id)
+        if not raw:
+            return None
+        trade = json.loads(raw)
+        await self._redis.hdel(POSITIONS_KEY, trade_id)
+        log.info("Pending order cancelled: %s (%s)", trade_id, reason)
+        await self._notify_cancelled(trade, reason)
+        return trade
+
     async def history(self, limit: int = 50) -> list[dict]:
         raw = await self._redis.lrange(HISTORY_KEY, 0, limit - 1)
         return [json.loads(r) for r in raw]
@@ -165,7 +198,7 @@ class PositionManager:
         # A per-cycle "still open, current R" digest used to fire every ~60s
         # here too — removed after it produced hundreds of messages overnight
         # for a single trade left open. Use /trades on demand instead.
-        trades = await self.list_open()
+        trades = [t for t in await self.list_open() if t.get("status") == "open"]
         if not trades:
             return
 
@@ -283,4 +316,29 @@ class PositionManager:
             "message":    msg,
             "parse_mode": "Markdown",
             "task_id":    f"partial_{trade['trade_id']}",
+        }))
+
+    async def _notify_filled(self, trade: dict):
+        def fmt(v): return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
+        msg = (
+            f"✅ *LIMIT-ORDER UDFYLDT — {trade['symbol']}*\n"
+            f"{trade['direction'].upper()} @ `{fmt(trade['entry'])}`\n"
+            f"SL: `{fmt(trade['stop_loss'])}`  TP: `{fmt(trade['take_profit'])}`\n"
+            f"Trade ID: `{trade['trade_id']}`"
+        )
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": msg, "parse_mode": "Markdown",
+            "task_id": f"filled_{trade['trade_id']}",
+        }))
+
+    async def _notify_cancelled(self, trade: dict, reason: str):
+        def fmt(v): return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
+        msg = (
+            f"🚫 *Limit-order annulleret — {trade['symbol']}*\n"
+            f"{trade['direction'].upper()} @ `{fmt(trade['entry'])}` ({reason})\n"
+            f"Trade ID: `{trade['trade_id']}`"
+        )
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": msg, "parse_mode": "Markdown",
+            "task_id": f"cancelled_{trade['trade_id']}",
         }))

@@ -668,10 +668,12 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sl = fmt(t.get("stop_loss", 0))
             tp = fmt(t.get("take_profit", 0))
             src = "🤖" if t.get("source") == "auto" else "👤"
+            status_tag = "⏳ AFVENTER (limit)" if t.get("status") == "pending" else ""
+            cancel_hint = f"\n  _Annuller: /cancel {t['trade_id']}_" if t.get("status") == "pending" else ""
             lines.append(
-                f"{src}{d} *{sym}* `{t['trade_id']}`\n"
+                f"{src}{d} *{sym}* `{t['trade_id']}` {status_tag}\n"
                 f"  Entry: `{entry}` | SL: `{sl}` | TP: `{tp}`\n"
-                f"  Åbnet: {t.get('opened_at','')[:16]}"
+                f"  Åbnet: {t.get('opened_at','')[:16]}{cancel_hint}"
             )
         stats = await api_get("/trading/stats")
         stats_text = (
@@ -759,6 +761,21 @@ async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"`{trade_id}`  P&L: `{pnl:+.2f}R`",
             parse_mode="Markdown"
         )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Cancel a pending limit order that hasn't filled yet: /cancel <trade_id>"""
+    if not await auth(update):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /cancel <trade_id>")
+        return
+    trade_id = ctx.args[0]
+    try:
+        await api_post(f"/trading/trades/{trade_id}/cancel", {})
+        await update.message.reply_text(f"🚫 Annulleret: `{trade_id}`", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -989,7 +1006,7 @@ async def main():
 
     handlers = [
         ("start", cmd_start), ("help", cmd_start),
-        ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close), ("why", cmd_why),
+        ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close), ("cancel", cmd_cancel), ("why", cmd_why),
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan), ("chart", cmd_chart),
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),

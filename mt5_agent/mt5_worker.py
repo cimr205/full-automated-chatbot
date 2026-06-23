@@ -126,7 +126,10 @@ def _initialize() -> bool:
 # ── MT5 execution ─────────────────────────────────────────────────────────────
 
 def mt5_open_trade(symbol: str, direction: str, volume: float,
-                   sl: float, tp: float, comment: str = "") -> dict:
+                   sl: float, tp: float, comment: str = "",
+                   order_type: str = "market", limit_price: float = 0) -> dict:
+    """order_type: "market" (immediate) or "limit" (pending order at limit_price,
+    sits until filled or manually cancelled)."""
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
     if not _initialize():
@@ -144,14 +147,20 @@ def mt5_open_trade(symbol: str, direction: str, volume: float,
         mt5.shutdown()
         return {"error": f"Ingen tick data for {symbol}"}
 
-    order_type = mt5.ORDER_TYPE_BUY if direction == "long" else mt5.ORDER_TYPE_SELL
-    price      = tick.ask if direction == "long" else tick.bid
+    if order_type == "limit" and limit_price:
+        action   = mt5.TRADE_ACTION_PENDING
+        mt5_type = mt5.ORDER_TYPE_BUY_LIMIT if direction == "long" else mt5.ORDER_TYPE_SELL_LIMIT
+        price    = limit_price
+    else:
+        action   = mt5.TRADE_ACTION_DEAL
+        mt5_type = mt5.ORDER_TYPE_BUY if direction == "long" else mt5.ORDER_TYPE_SELL
+        price    = tick.ask if direction == "long" else tick.bid
 
     request = {
-        "action":       mt5.TRADE_ACTION_DEAL,
+        "action":       action,
         "symbol":       symbol,
         "volume":       volume,
-        "type":         order_type,
+        "type":         mt5_type,
         "price":        price,
         "sl":           sl,
         "tp":           tp,
@@ -170,12 +179,59 @@ def mt5_open_trade(symbol: str, direction: str, volume: float,
         return {"error": f"MT5 fejl {result.retcode}: {result.comment}"}
 
     return {
-        "ticket":    result.order,
-        "price":     result.price,
-        "volume":    result.volume,
-        "symbol":    symbol,
-        "direction": direction,
+        "ticket":     result.order,
+        "price":      result.price,
+        "volume":     result.volume,
+        "symbol":     symbol,
+        "direction":  direction,
+        "order_type": order_type,
+        "pending":    order_type == "limit",
     }
+
+
+def mt5_check_pending(order_ticket: int) -> dict:
+    """Status of a pending limit order: still pending, filled (now a position), or cancelled."""
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    still_pending = mt5.orders_get(ticket=order_ticket)
+    if still_pending:
+        mt5.shutdown()
+        return {"status": "pending"}
+
+    hist = mt5.history_orders_get(ticket=order_ticket)
+    mt5.shutdown()
+    if not hist:
+        return {"status": "unknown"}
+
+    order = hist[0]
+    if order.state == mt5.ORDER_STATE_FILLED:
+        return {
+            "status":       "filled",
+            "position_id":  order.position_id,
+            "price":        order.price_open,
+        }
+    if order.state in (mt5.ORDER_STATE_CANCELED, mt5.ORDER_STATE_EXPIRED, mt5.ORDER_STATE_REJECTED):
+        return {"status": "cancelled"}
+    return {"status": "unknown"}
+
+
+def mt5_cancel_pending(order_ticket: int) -> dict:
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    request = {"action": mt5.TRADE_ACTION_REMOVE, "order": order_ticket}
+    result = mt5.order_send(request)
+    mt5.shutdown()
+
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        err = result.comment if result else "None"
+        return {"error": f"Annullering fejlede: {err}"}
+    return {"cancelled": True, "ticket": order_ticket}
 
 
 def mt5_get_account_info() -> dict:
@@ -276,8 +332,11 @@ async def handle_command(cmd: dict, redis: aioredis.Redis):
     log.info("Kommando: %s %s %s vol=%s", command, symbol, direction, volume)
 
     if command == "open":
+        order_type  = cmd.get("order_type", "market")
+        limit_price = float(cmd.get("limit_price", 0) or 0)
         result  = mt5_open_trade(symbol, direction, volume, sl, tp,
-                                 comment=f"auto_{trade_id[:8]}")
+                                 comment=f"auto_{trade_id[:8]}",
+                                 order_type=order_type, limit_price=limit_price)
         payload = {
             "trade_id": trade_id,
             "command":  "open",
@@ -288,7 +347,29 @@ async def handle_command(cmd: dict, redis: aioredis.Redis):
         if "error" in result:
             log.error("Åbn fejlede: %s", result["error"])
         else:
-            log.info("Åbnet: ticket=%s @ %s", result.get("ticket"), result.get("price"))
+            log.info("Åbnet: ticket=%s @ %s (%s)", result.get("ticket"), result.get("price"), order_type)
+
+    elif command == "check_pending" and ticket:
+        result  = mt5_check_pending(int(ticket))
+        payload = {
+            "trade_id": trade_id,
+            "command":  "check_pending",
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+
+    elif command == "cancel_pending" and ticket:
+        result  = mt5_cancel_pending(int(ticket))
+        payload = {
+            "trade_id": trade_id,
+            "command":  "cancel_pending",
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+        if result.get("cancelled"):
+            log.info("Pending order annulleret: ticket=%s", ticket)
+        else:
+            log.error("Annullering fejlede: %s", result.get("error"))
 
     elif command == "close" and ticket:
         result  = mt5_close_trade(int(ticket), symbol, direction, volume)

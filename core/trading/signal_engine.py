@@ -57,13 +57,15 @@ def detect_fvg(ohlcv: list) -> dict | None:
             bot, top = c1[2], c3[3]
             if bot * 0.997 <= current <= top * 1.003:
                 return {"type": "bullish_fvg",
-                        "label": f"Bullish FVG zone ({bot:.5g} – {top:.5g})"}
+                        "label": f"Bullish FVG zone ({bot:.5g} – {top:.5g})",
+                        "limit_price": bot}   # near edge — buy limit at the bottom of the gap
         # Bearish FVG: c3 high < c1 low
         elif c3[2] < c1[3]:
             bot, top = c3[2], c1[3]
             if bot * 0.997 <= current <= top * 1.003:
                 return {"type": "bearish_fvg",
-                        "label": f"Bearish FVG zone ({bot:.5g} – {top:.5g})"}
+                        "label": f"Bearish FVG zone ({bot:.5g} – {top:.5g})",
+                        "limit_price": top}   # near edge — sell limit at the top of the gap
     return None
 
 
@@ -80,10 +82,12 @@ def detect_break_retest(ohlcv: list, lookback: int = 40) -> dict | None:
 
     if max(closes[-15:]) > swing_high and abs(current - swing_high) / swing_high < tol:
         return {"type": "bullish_break_retest",
-                "label": f"Bullish Break & Retest @ {swing_high:.5g}"}
+                "label": f"Bullish Break & Retest @ {swing_high:.5g}",
+                "limit_price": swing_high}   # buy limit at the retested level
     if min(closes[-15:]) < swing_low and abs(current - swing_low) / swing_low < tol:
         return {"type": "bearish_break_retest",
-                "label": f"Bearish Break & Retest @ {swing_low:.5g}"}
+                "label": f"Bearish Break & Retest @ {swing_low:.5g}",
+                "limit_price": swing_low}   # sell limit at the retested level
     return None
 
 
@@ -286,23 +290,15 @@ def score_signal(
     e50_val  = base.get("e50", price)
     e200_val = base.get("e200", price)
 
-    # ── Price levels ──
-    if direction == "long":
-        stop_loss   = price - ATR_SL_MULT * atr_val
-        take_profit = price + ATR_TP_MULT * atr_val
-        partial_tp  = price + PARTIAL_R   * atr_val
-    else:
-        stop_loss   = price + ATR_SL_MULT * atr_val
-        take_profit = price - ATR_TP_MULT * atr_val
-        partial_tp  = price - PARTIAL_R   * atr_val
-
-    rr_ratio = abs(take_profit - price) / max(abs(stop_loss - price), 1e-10)
-
     # ── Setup detection on 1h (primary execution timeframe) ──
     # "type" is a stable category (e.g. "bullish_fvg") used for grouping/learning;
     # "label" is the human-readable string with the specific price levels for display.
+    # FVG and Break & Retest have a natural, precise level to aim for — those go
+    # in as limit orders at that level instead of chasing the current market price.
     setups      = []   # display labels
     setup_kinds = []   # stable categories
+    setup_limit_price = None
+    LIMIT_ORDER_KINDS = {"bullish_fvg", "bearish_fvg", "bullish_break_retest", "bearish_break_retest"}
     for detector in (detect_fvg, detect_break_retest, detect_liquidity_grab, detect_trend_pullback):
         result = detector(ohlcv_1h)
         if result:
@@ -310,9 +306,25 @@ def score_signal(
             if expected == direction:
                 setups.append(result["label"])
                 setup_kinds.append(result["type"])
+                if setup_limit_price is None and result["type"] in LIMIT_ORDER_KINDS:
+                    setup_limit_price = result.get("limit_price")
 
     setup_type  = setup_kinds[0] if setup_kinds else None
     setup_label = setups[0] if setups else None
+    order_type  = "limit" if (setup_type in LIMIT_ORDER_KINDS and setup_limit_price) else "market"
+    entry_price = setup_limit_price if order_type == "limit" else price
+
+    # ── Price levels (relative to entry_price — the limit level if pending, else market) ──
+    if direction == "long":
+        stop_loss   = entry_price - ATR_SL_MULT * atr_val
+        take_profit = entry_price + ATR_TP_MULT * atr_val
+        partial_tp  = entry_price + PARTIAL_R   * atr_val
+    else:
+        stop_loss   = entry_price + ATR_SL_MULT * atr_val
+        take_profit = entry_price - ATR_TP_MULT * atr_val
+        partial_tp  = entry_price - PARTIAL_R   * atr_val
+
+    rr_ratio = abs(take_profit - entry_price) / max(abs(stop_loss - entry_price), 1e-10)
 
     # ── Confluence count ──
     confluence = len(all_reasons) + len(setups)
@@ -325,7 +337,7 @@ def score_signal(
         "1_trend_aligned":    (direction == "long"  and e50_val > e200_val) or
                               (direction == "short" and e50_val < e200_val),
         "2_confluence_3plus": confluence >= MIN_CONFLUENCE,
-        "3_sl_logical":       atr_val > 0 and abs(stop_loss - price) > 0,
+        "3_sl_logical":       atr_val > 0 and abs(stop_loss - entry_price) > 0,
         "4_rr_min_1_2":       rr_ratio >= MIN_RR,
         "5_risk_1_2_pct":     True,      # enforced at execution, always compliant here
         "6_not_chasing":      bool(setup_type) or abs(price - e50_val) / e50_val < 0.015,
@@ -344,7 +356,10 @@ def score_signal(
         "setups":       setups,
         "setup_type":   setup_type,
         "setup_label":  setup_label,
-        "price":        price,
+        "price":        entry_price,    # entry reference used downstream — limit level if pending
+        "market_price": price,          # actual current price at signal time, for display
+        "order_type":   order_type,      # "market" or "limit"
+        "limit_price":  setup_limit_price,
         "stop_loss":    stop_loss,
         "take_profit":  take_profit,
         "partial_tp":   partial_tp,

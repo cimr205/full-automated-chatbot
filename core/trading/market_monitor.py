@@ -73,6 +73,7 @@ class MarketMonitor:
                  MONITOR_INTERVAL, CONFIDENCE_THRESH * 100)
         asyncio.create_task(self.positions.run())
         asyncio.create_task(self.mt5.run())
+        asyncio.create_task(self._pending_orders_loop())
         while self._running:
             try:
                 await self._scan_all()
@@ -82,6 +83,38 @@ class MarketMonitor:
 
     def stop(self):
         self._running = False
+
+    # ── Pending limit orders ─────────────────────────────────────────────────
+
+    async def _pending_orders_loop(self):
+        """Polls MT5 every 60s for pending limit orders that have filled or
+        been cancelled. No auto-expiry — they sit until one of those happens
+        or you /cancel them."""
+        while self._running:
+            try:
+                await self._check_pending_orders()
+            except Exception as e:
+                log.warning("Pending-orders check error: %s", e)
+            await asyncio.sleep(60)
+
+    async def _check_pending_orders(self):
+        pending = await self.positions.list_pending()
+        if not pending:
+            return
+        for trade in pending:
+            trade_id = trade["trade_id"]
+            ticket_raw = await self._redis.hget("trading:mt5:tickets", trade_id)
+            if not ticket_raw:
+                continue
+            ticket = json.loads(ticket_raw).get("ticket")
+            if not ticket:
+                continue
+            result = await self.mt5.check_pending(ticket)
+            status = result.get("status")
+            if status == "filled":
+                await self.positions.mark_filled(trade_id, result.get("price", trade["entry"]))
+            elif status == "cancelled":
+                await self.positions.cancel_pending(trade_id, reason="annulleret/udløbet i MT5")
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
 
@@ -187,7 +220,10 @@ class MarketMonitor:
         self._last_signal[symbol] = {"direction": direction, "ts": now}
         await self._publish(symbol, market, signal)
 
-        # Log position in Redis (always)
+        order_type  = signal.get("order_type", "market")
+        limit_price = signal.get("limit_price") or 0
+
+        # Log position in Redis (always) — "pending" status if it's a limit order
         trade_id = await self.positions.open_trade(
             symbol=symbol, market=market,
             direction=direction,
@@ -197,6 +233,7 @@ class MarketMonitor:
             partial_tp=signal.get("partial_tp", 0),
             signal_data=signal,
             source="auto",
+            order_type=order_type,
         )
 
         # Execute in MT5 if worker is online (optional — works without it)
@@ -211,11 +248,14 @@ class MarketMonitor:
                     stop_loss=signal["stop_loss"],
                     take_profit=signal["take_profit"],
                     volume=volume or 0,
+                    order_type=order_type,
+                    limit_price=limit_price,
                 )
                 if "error" in mt5_result:
                     log.warning("MT5 execution failed: %s", mt5_result["error"])
                 else:
-                    log.info("MT5 order placed: ticket=%s vol=%s", mt5_result.get("ticket"), volume)
+                    log.info("MT5 order placed: ticket=%s vol=%s type=%s",
+                             mt5_result.get("ticket"), volume, order_type)
         except Exception as e:
             log.warning("MT5 execution error (non-fatal): %s", e)
 
@@ -373,13 +413,23 @@ class MarketMonitor:
 
         def fmt(v): return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
 
-        dir_emoji = "📈 LONG" if direction == "long" else "📉 SHORT"
+        order_type = signal.get("order_type", "market")
+        dir_emoji  = "📈 LONG" if direction == "long" else "📉 SHORT"
+        if order_type == "limit":
+            header     = "⏳ *LIMIT-ORDER LAGT*"
+            entry_line = f"💰 Limit-niveau:   `{fmt(price)}` _(afventer udfyldelse)_\n"
+            footer     = f"\n\n_Udfyldes automatisk hvis prisen rammer niveauet. Ingen udløb._\n_Annuller: /cancel {trade_id}_"
+        else:
+            header     = "✅ *TRADE ÅBNET AUTOMATISK*"
+            entry_line = f"💰 Entry:          `{fmt(price)}`\n"
+            footer     = f"\n\n_Systemet overvåger positionen automatisk._\n_Stop: /close {trade_id}_"
+
         msg = (
-            f"✅ *TRADE ÅBNET AUTOMATISK*\n"
+            f"{header}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"*{symbol}*  {dir_emoji}\n"
             f"Trade ID: `{trade_id}`\n\n"
-            f"💰 Entry:          `{fmt(price)}`\n"
+            f"{entry_line}"
             f"🛑 Stop Loss:    `{fmt(sl)}`\n"
             f"🎯 Take Profit:  `{fmt(tp)}`\n"
             f"💛 Delvis ved:   `{fmt(partial_tp)}` _(→ flyt SL til BE)_\n"
@@ -388,8 +438,7 @@ class MarketMonitor:
             f"  📐 Setup: {setup}\n"
             f"  🕐 Session: {session}\n" +
             "\n".join(f"  • {r}" for r in reasons) +
-            f"\n\n_Systemet overvåger positionen automatisk._\n"
-            f"_Stop: /close {trade_id}_"
+            footer
         )
         await self._redis.publish("supervisor:notifications", json.dumps({
             "message": msg, "parse_mode": "Markdown",
