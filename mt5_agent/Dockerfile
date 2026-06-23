@@ -12,6 +12,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 ENV DISPLAY=:99
+# Disables Wine's built-in Mono/Gecko install prompts — those are GUI dialogs
+# that hang forever with no display interaction in a headless build.
+ENV WINEDLLOVERRIDES="mscoree=d;mshtml=d"
 
 # Ubuntu's own wine64/wine32 packages are frequently broken in containers
 # ("Exec format error" even on a correctly-pinned amd64 image) — install
@@ -30,23 +33,29 @@ RUN dpkg --add-architecture i386 \
 
 WORKDIR /app
 
+# Initialize the Wine prefix on its own first — if this is going to hang on
+# a Mono/Gecko prompt, fail fast here (within the timeout) instead of inside
+# winetricks where it's harder to diagnose.
+RUN xvfb-run -a timeout 120 wineboot --init || true
+
 # Visual C++ runtime — the MT5 terminal needs this to launch under Wine.
 # --force skips winetricks' bundled sha256 check, which goes stale whenever
 # Microsoft rotates the redistributable file out from under the cached hash.
-RUN xvfb-run -a winetricks --force -q vcrun2019 corefonts
+# timeout ensures a hung GUI installer fails the build instead of stalling it.
+RUN xvfb-run -a timeout 300 winetricks --force -q vcrun2019 corefonts
 
 # Windows Python (inside Wine) — MetaTrader5 pip package only works on Windows Python
 RUN wget -q -O /tmp/python-installer.exe \
       https://www.python.org/ftp/python/3.11.8/python-3.11.8-amd64.exe \
- && xvfb-run -a wine /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1 \
+ && xvfb-run -a timeout 180 wine /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1 \
  && rm /tmp/python-installer.exe
 
-RUN xvfb-run -a wine python -m pip install --no-cache-dir MetaTrader5
+RUN xvfb-run -a timeout 180 wine python -m pip install --no-cache-dir MetaTrader5
 
 # MT5 terminal itself, silent install to the default path
 RUN wget -q -O /tmp/mt5setup.exe \
       https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe \
- && xvfb-run -a wine /tmp/mt5setup.exe /auto \
+ && xvfb-run -a timeout 180 wine /tmp/mt5setup.exe /auto \
  && rm /tmp/mt5setup.exe
 
 # Native Linux side — this is what mt5_worker.py actually runs as
