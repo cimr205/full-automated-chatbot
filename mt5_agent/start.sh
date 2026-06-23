@@ -13,6 +13,7 @@ set -u
 WINEPREFIX="${WINEPREFIX:-/data/wine}"
 MARKER="$WINEPREFIX/.mt5_setup_done"
 
+rm -f /tmp/.X99-lock
 Xvfb :99 -screen 0 1024x768x16 &
 XVFB_PID=$!
 sleep 2
@@ -35,7 +36,7 @@ setup_wine() {
   timeout 180 wine /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1
   wineserver -w
   rm -f /tmp/python-installer.exe
-  timeout 180 wine python -m pip install --no-cache-dir MetaTrader5
+  timeout 180 wine python -m pip install --no-cache-dir MetaTrader5 mt5linux
   wineserver -w
 
   echo "=== [4/4] MT5 terminal ==="
@@ -56,13 +57,17 @@ else
   setup_wine
 fi
 
-WINE_PYTHON="$(find "$WINEPREFIX" -iname 'python.exe' 2>/dev/null | head -1)"
+# mt5linux's server must run INSIDE Wine using Wine's own python (that's
+# where MetaTrader5 and mt5linux are installed) — not from the native side.
+# Exclude the venv template stub under Lib/venv/scripts/nt/python.exe,
+# which `find` would otherwise happily match first.
+WINE_PYTHON="$(find "$WINEPREFIX" -iname 'python.exe' -not -path '*/venv/*' 2>/dev/null | head -1)"
 if [ -z "$WINE_PYTHON" ]; then
   echo "FEJL: Kunne ikke finde Wine's python.exe efter opsætning."
   exit 1
 fi
 
-python3 -m mt5linux --host 0.0.0.0 -p "${MT5_LINUX_PORT:-18812}" "$WINE_PYTHON" &
+wine "$WINE_PYTHON" -m mt5linux --host 0.0.0.0 -p "${MT5_LINUX_PORT:-18812}" &
 BRIDGE_PID=$!
 sleep 5
 
