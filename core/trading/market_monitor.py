@@ -109,8 +109,9 @@ class MarketMonitor:
             except Exception as e:
                 log.warning("[%s] analyze error: %s", symbol, e)
             await asyncio.sleep(2)   # gentle rate limit
-
-        await self._send_watchlist_chart()
+        # Watchlist chart used to auto-send every cycle here — removed,
+        # it's a non-trade notification and contributed to message overload.
+        # Available on demand via /chart instead (see _send_watchlist_chart).
 
     async def _analyze(self, symbol: str, market: str):
         # Fetch 1h data (used as base + resampled to 4h)

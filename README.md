@@ -163,6 +163,7 @@ daily-loss or max-drawdown limit.
 | Command | Description |
 |---------|-------------|
 | `/scan` | Trigger an immediate market scan |
+| `/chart` | Send the watchlist overview chart now (no longer sent automatically) |
 | `/trades` | List open trades + stats |
 | `/trading_pause` / `/trading_resume` | Pause/resume new auto-trades (open positions still monitored) |
 | `/risk` | Show equity, daily/total drawdown, and lock status |
@@ -188,9 +189,12 @@ judged on its combined track record. Worth revisiting if you trade a wide watchl
 thing any honest system can promise. What *is* real: every closed trade is tagged by setup
 type, and once a setup type has lost money over enough trades (`core/trading/learning.py`,
 5+ trades and <35% win rate by default), it's automatically blocked from auto-executing
-again until you review it. Open positions also get a live R-multiple status pushed to
-Telegram every ~60 seconds (as often as the price actually updates) — see `_send_status_digest`
-in `core/trading/position_manager.py`.
+again until you review it.
+
+**Telegram notifications are trade-event-only, by design:** a signal found → trade opened →
+SL/TP/partial hit → trade closed. No per-minute "still open" digest and no automatic
+watchlist chart — both existed earlier and were removed after producing hundreds of
+messages overnight for a single open trade. Use `/trades` or `/chart` on demand instead.
 
 ## Recovery
 

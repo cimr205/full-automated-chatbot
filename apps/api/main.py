@@ -454,6 +454,14 @@ async def trigger_scan():
     return {"status": "scan_started"}
 
 
+@app.post("/trading/chart-now")
+async def trigger_chart():
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    await market_monitor._send_watchlist_chart()
+    return {"status": "sent"}
+
+
 class TradeOpen(BaseModel):
     symbol:      str
     market:      str = "forex"

@@ -500,6 +500,16 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_chart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send the watchlist overview chart on demand (no longer sent automatically)."""
+    if not await auth(update):
+        return
+    try:
+        await api_post("/trading/chart-now", {})
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_trading_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Pause the auto-trading scanner (it keeps monitoring open positions)."""
     if not await auth(update):
@@ -980,7 +990,7 @@ async def main():
     handlers = [
         ("start", cmd_start), ("help", cmd_start),
         ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close), ("why", cmd_why),
-        ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan),
+        ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan), ("chart", cmd_chart),
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
         ("lessons", cmd_lessons), ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
