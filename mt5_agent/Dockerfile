@@ -37,9 +37,11 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends wine-stable-amd64 \
  && rm -rf /var/lib/apt/lists/* \
+ && dpkg -L wine-stable-amd64 > /tmp/wine-files.txt \
+ && grep -E "/(wine64|wineboot|wineserver)$" /tmp/wine-files.txt \
  && for bin in wine64 wineboot wineserver; do \
-      path=$(find / \( -type f -o -type l \) -name "$bin" 2>/dev/null | head -1); \
-      if [ -n "$path" ]; then ln -sf "$path" /usr/bin/$bin; fi; \
+      path=$(grep -E "/$bin\$" /tmp/wine-files.txt | head -1); \
+      ln -sf "$path" /usr/bin/$bin; \
     done \
  && which wine64 wineboot wineserver
 
