@@ -38,7 +38,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends wine-stable-amd64 \
  && rm -rf /var/lib/apt/lists/* \
  && for bin in wine64 wineboot wineserver; do \
-      path=$(find / -name "$bin" -type f 2>/dev/null | head -1); \
+      path=$(find / \( -type f -o -type l \) -name "$bin" 2>/dev/null | head -1); \
       if [ -n "$path" ]; then ln -sf "$path" /usr/bin/$bin; fi; \
     done \
  && which wine64 wineboot wineserver
