@@ -19,8 +19,15 @@ ENV WINEDLLOVERRIDES="mscoree=d;mshtml=d"
 # Ubuntu's own wine64/wine32 packages are frequently broken in containers
 # ("Exec format error" even on a correctly-pinned amd64 image) — install
 # from WineHQ's official repo instead, which is what they actually test.
-RUN dpkg --add-architecture i386 \
- && apt-get update \
+#
+# 64-bit ONLY, deliberately: MT5's terminal64.exe, the Windows Python
+# installer, and vc_redist.x64.exe are all 64-bit-only anyway, and every
+# i386 (32-bit) binary in this build sandbox fails with "Exec format
+# error" — only amd64 binaries actually execute here. Skipping
+# `dpkg --add-architecture i386` and installing wine-stable-amd64 directly
+# (instead of the winehq-stable meta-package, which pulls in 32-bit WoW64
+# support) avoids that whole class of failure.
+RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       xvfb wget ca-certificates cabextract unzip gnupg \
       python3 python3-pip \
@@ -28,8 +35,11 @@ RUN dpkg --add-architecture i386 \
  && wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key \
  && wget -q -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources \
  && apt-get update \
- && apt-get install -y --install-recommends winehq-stable \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends wine-stable-amd64 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /opt/wine-stable/bin/wine64 /usr/bin/wine64 \
+ && ln -sf /opt/wine-stable/bin/wineboot /usr/bin/wineboot \
+ && ln -sf /opt/wine-stable/bin/wineserver /usr/bin/wineserver
 
 WORKDIR /app
 
@@ -49,21 +59,21 @@ RUN xvfb-run -a sh -c "timeout 120 wineboot --init; wineserver -w; exit 0"
 # own /quiet /install flags don't need that check at all.
 RUN wget -q -O /tmp/vc_redist.x64.exe \
       https://aka.ms/vs/16/release/vc_redist.x64.exe \
- && xvfb-run -a sh -c "timeout 180 wine /tmp/vc_redist.x64.exe /quiet /install /norestart; rc=\$?; wineserver -w; exit \$rc" \
+ && xvfb-run -a sh -c "timeout 180 wine64 /tmp/vc_redist.x64.exe /quiet /install /norestart; rc=\$?; wineserver -w; exit \$rc" \
  && rm /tmp/vc_redist.x64.exe
 
 # Windows Python (inside Wine) — MetaTrader5 pip package only works on Windows Python
 RUN wget -q -O /tmp/python-installer.exe \
       https://www.python.org/ftp/python/3.11.8/python-3.11.8-amd64.exe \
- && xvfb-run -a sh -c "timeout 180 wine /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1; rc=\$?; wineserver -w; exit \$rc" \
+ && xvfb-run -a sh -c "timeout 180 wine64 /tmp/python-installer.exe /quiet InstallAllUsers=1 PrependPath=1; rc=\$?; wineserver -w; exit \$rc" \
  && rm /tmp/python-installer.exe
 
-RUN xvfb-run -a sh -c "timeout 180 wine python -m pip install --no-cache-dir MetaTrader5; rc=\$?; wineserver -w; exit \$rc"
+RUN xvfb-run -a sh -c "timeout 180 wine64 python -m pip install --no-cache-dir MetaTrader5; rc=\$?; wineserver -w; exit \$rc"
 
 # MT5 terminal itself, silent install to the default path
 RUN wget -q -O /tmp/mt5setup.exe \
       https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe \
- && xvfb-run -a sh -c "timeout 180 wine /tmp/mt5setup.exe /auto; rc=\$?; wineserver -w; exit \$rc" \
+ && xvfb-run -a sh -c "timeout 180 wine64 /tmp/mt5setup.exe /auto; rc=\$?; wineserver -w; exit \$rc" \
  && rm /tmp/mt5setup.exe
 
 # Native Linux side — this is what mt5_worker.py actually runs as
