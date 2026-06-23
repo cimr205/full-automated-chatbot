@@ -19,8 +19,10 @@ RUN dpkg --add-architecture i386 \
 
 WORKDIR /app
 
-# Visual C++ runtime — the MT5 terminal needs this to launch under Wine
-RUN xvfb-run -a winetricks -q vcrun2019 corefonts
+# Visual C++ runtime — the MT5 terminal needs this to launch under Wine.
+# --force skips winetricks' bundled sha256 check, which goes stale whenever
+# Microsoft rotates the redistributable file out from under the cached hash.
+RUN xvfb-run -a winetricks --force -q vcrun2019 corefonts
 
 # Windows Python (inside Wine) — MetaTrader5 pip package only works on Windows Python
 RUN wget -q -O /tmp/python-installer.exe \
