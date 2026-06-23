@@ -3,7 +3,10 @@
 #
 # Heavy image: Wine + a Windows Python + the MT5 terminal. Build can take
 # 10-15 minutes the first time — that's normal.
-FROM ubuntu:22.04
+# Pinned to amd64 — wine64/wine32 (and MT5 itself) need x86_64; without this
+# the build can silently resolve to an arm64 base on ARM builders, and wine
+# fails with "Exec format error" at runtime.
+FROM --platform=linux/amd64 ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WINEARCH=win64
