@@ -13,11 +13,19 @@ ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 ENV DISPLAY=:99
 
+# Ubuntu's own wine64/wine32 packages are frequently broken in containers
+# ("Exec format error" even on a correctly-pinned amd64 image) — install
+# from WineHQ's official repo instead, which is what they actually test.
 RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      wine64 wine32 winetricks xvfb wget ca-certificates cabextract unzip \
+      winetricks xvfb wget ca-certificates cabextract unzip gnupg \
       python3 python3-pip \
+ && mkdir -p /etc/apt/keyrings \
+ && wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key \
+ && wget -q -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources \
+ && apt-get update \
+ && apt-get install -y --install-recommends winehq-stable \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
