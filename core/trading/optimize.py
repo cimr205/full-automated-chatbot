@@ -15,24 +15,32 @@ Run standalone: python -m core.trading.optimize
 import asyncio
 import itertools
 import json
+import sys
+import time
 
 from . import signal_engine as se
 from .backtest import fetch_history, simulate
 
 DEFAULT_SYMBOLS = ["EURUSD=X", "GBPUSD=X", "GC=F", "USDJPY=X", "GBPJPY=X"]
 
+# Kept deliberately small — an earlier 3x3x3x3x6 grid (2430 simulate() calls)
+# ran for over 2 hours without finishing; looser thresholds trigger far more
+# signals (each needing its own forward-walk to find the exit), so per-call
+# cost varies a lot more than a single-combo timing test suggested. This
+# grid finishes in well under an hour and still covers the parameters that
+# matter most (confidence + SL/TP sizing).
 PARAM_GRID = {
-    "MIN_CONFLUENCE": [2, 3, 4],
+    "MIN_CONFLUENCE": [2, 3],
     "ATR_SL_MULT":    [1.0, 1.5, 2.0],
-    "ATR_TP_MULT":    [2.0, 3.0, 4.0],
-    "MIN_RR":         [1.5, 2.0, 2.5],
+    "ATR_TP_MULT":    [2.0, 3.0],
+    "MIN_RR":         [1.5, 2.0],
 }
-CONFIDENCE_GRID = [0.55, 0.60, 0.65, 0.68, 0.72, 0.76]
+CONFIDENCE_GRID = [0.60, 0.65, 0.68, 0.72]
 
 MIN_SAMPLE_SIZE = 15   # don't trust a win rate/expectancy computed from too few trades
 
 
-async def run_sweep(symbols: list = None) -> dict:
+async def run_sweep(symbols: list = None, progress: bool = False) -> dict:
     symbols = symbols or DEFAULT_SYMBOLS
     histories = {}
     for sym in symbols:
@@ -45,9 +53,12 @@ async def run_sweep(symbols: list = None) -> dict:
 
     original = {k: getattr(se, k) for k in PARAM_GRID}
     results = []
+    keys   = list(PARAM_GRID.keys())
+    combos = list(itertools.product(*PARAM_GRID.values()))
+    total_settings = len(combos) * len(CONFIDENCE_GRID)
+    done = 0
+    t_start = time.time()
     try:
-        keys = list(PARAM_GRID.keys())
-        combos = list(itertools.product(*PARAM_GRID.values()))
         for combo in combos:
             params = dict(zip(keys, combo))
             for k, v in params.items():
@@ -60,6 +71,13 @@ async def run_sweep(symbols: list = None) -> dict:
                     agg["losses"]  += o["losses"]
                     agg["total_r"] += o["total_r"]
                 total = agg["wins"] + agg["losses"]
+                done += 1
+                if progress and done % 5 == 0:
+                    elapsed = time.time() - t_start
+                    rate = elapsed / done
+                    eta_min = (total_settings - done) * rate / 60
+                    print(f"[{done}/{total_settings}] elapsed={elapsed/60:.1f}min "
+                          f"eta={eta_min:.1f}min", file=sys.stderr, flush=True)
                 if total < MIN_SAMPLE_SIZE:
                     continue
                 results.append({
@@ -86,7 +104,7 @@ async def run_sweep(symbols: list = None) -> dict:
 
 
 def _cli():
-    result = asyncio.run(run_sweep())
+    result = asyncio.run(run_sweep(progress=True))
     print(json.dumps(result, indent=2))
 
 
