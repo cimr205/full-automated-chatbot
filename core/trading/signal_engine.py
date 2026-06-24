@@ -258,13 +258,24 @@ def score_signal(
     ohlcv_4h:  list | None = None,
     ohlcv_1d:  list | None = None,
     at:        datetime | None = None,   # backtesting: pass the candle's own timestamp
+    min_confluence: float | None = None,  # per-symbol overrides (see market_monitor.SYMBOL_OVERRIDES)
+    atr_sl_mult:    float | None = None,
+    atr_tp_mult:    float | None = None,
+    min_rr:         float | None = None,
 ) -> dict:
     """
     Full multi-timeframe signal with setup detection, session check,
     and 8-point pre-trade checklist.
 
     Returns a dict. Check signal["checklist_ok"] == True before acting.
+    The four override params let a caller tune one symbol differently from
+    the global defaults (e.g. gold backtests better with a tighter stop)
+    without mutating module-level state.
     """
+    min_confluence = MIN_CONFLUENCE if min_confluence is None else min_confluence
+    atr_sl_mult    = ATR_SL_MULT    if atr_sl_mult    is None else atr_sl_mult
+    atr_tp_mult    = ATR_TP_MULT    if atr_tp_mult    is None else atr_tp_mult
+    min_rr         = MIN_RR         if min_rr         is None else min_rr
     no_signal = {"direction": "neutral", "confidence": 0.0, "checklist_ok": False,
                  "reasons": [], "setups": [], "price": ohlcv_1h[-1][4] if ohlcv_1h else 0}
 
@@ -323,12 +334,12 @@ def score_signal(
 
     # ── Price levels (relative to entry_price — the limit level if pending, else market) ──
     if direction == "long":
-        stop_loss   = entry_price - ATR_SL_MULT * atr_val
-        take_profit = entry_price + ATR_TP_MULT * atr_val
+        stop_loss   = entry_price - atr_sl_mult * atr_val
+        take_profit = entry_price + atr_tp_mult * atr_val
         partial_tp  = entry_price + PARTIAL_R   * atr_val
     else:
-        stop_loss   = entry_price + ATR_SL_MULT * atr_val
-        take_profit = entry_price - ATR_TP_MULT * atr_val
+        stop_loss   = entry_price + atr_sl_mult * atr_val
+        take_profit = entry_price - atr_tp_mult * atr_val
         partial_tp  = entry_price - PARTIAL_R   * atr_val
 
     rr_ratio = abs(take_profit - entry_price) / max(abs(stop_loss - entry_price), 1e-10)
@@ -343,9 +354,9 @@ def score_signal(
     checklist = {
         "1_trend_aligned":    (direction == "long"  and e50_val > e200_val) or
                               (direction == "short" and e50_val < e200_val),
-        "2_confluence_3plus": confluence >= MIN_CONFLUENCE,
+        "2_confluence_3plus": confluence >= min_confluence,
         "3_sl_logical":       atr_val > 0 and abs(stop_loss - entry_price) > 0,
-        "4_rr_min_1_2":       rr_ratio >= MIN_RR,
+        "4_rr_min_1_2":       rr_ratio >= min_rr,
         "5_risk_1_2_pct":     True,      # enforced at execution, always compliant here
         "6_not_chasing":      bool(setup_type) or abs(price - e50_val) / e50_val < 0.015,
         "7_active_session":   sess["tradeable"],

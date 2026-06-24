@@ -44,6 +44,16 @@ DEFAULT_STOCKS = [
     "^GSPC", "^NDX", "^DJI",
 ]
 
+# Per-symbol overrides for signal_engine's global defaults — backtesting
+# found gold needs a tighter stop than the rest of the basket (192-setting
+# GC=F-only sweep on 2026-06-24: ATR_SL_MULT=0.75 beat the global 1.0
+# default, 35.9% win rate / +0.80R/trade). Add more entries here as
+# per-symbol sweeps justify them; nothing here overrides risk management,
+# only which ATR multiple/confluence/RR signal_engine checks against.
+SYMBOL_OVERRIDES = {
+    "GC=F": {"atr_sl_mult": 0.75},
+}
+
 # Yahoo Finance interval mapping: (1h, 4h, 1d)
 _YF_INTERVAL = {
     "1h": "1h",
@@ -157,7 +167,14 @@ class MarketMonitor:
         ohlcv_4h = _resample_4h(ohlcv_1h)
         ohlcv_1d = await self._fetch(symbol, "1d")
 
-        signal = score_signal(ohlcv_1h, ohlcv_4h, ohlcv_1d)
+        overrides = SYMBOL_OVERRIDES.get(symbol, {})
+        signal = score_signal(
+            ohlcv_1h, ohlcv_4h, ohlcv_1d,
+            min_confluence=overrides.get("min_confluence"),
+            atr_sl_mult=overrides.get("atr_sl_mult"),
+            atr_tp_mult=overrides.get("atr_tp_mult"),
+            min_rr=overrides.get("min_rr"),
+        )
 
         # Always journal the scan (even if signal is rejected)
         await self._journal(symbol, market, signal, published=False)
