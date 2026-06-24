@@ -14,8 +14,15 @@ from .indicators import rsi, ema, macd, bollinger, atr, volume_ratio, stochastic
 
 CET           = ZoneInfo("Europe/Paris")
 MIN_CONFLUENCE = 3      # minimum 3 independent factors
-ATR_SL_MULT    = 1.5    # stop loss = 1.5x ATR below/above entry
-ATR_TP_MULT    = 3.0    # take profit = 3x ATR  →  1:2 R:R
+# ATR_SL_MULT lowered from 1.5 to 1.0 on 2026-06-24 based on
+# core/trading/optimize.py's parameter sweep (~2yr 1h data, EURUSD/GBPUSD/
+# GC=F/USDJPY/GBPJPY): every top-10 result converged on SL=1.0x ATR with
+# TP unchanged at 3x ATR (so realized R:R is now 3:1, not 2:1). Lower raw
+# win rate (~48%) but materially better expectancy: +0.93R/trade average
+# vs the old 1.5x setting, which didn't place in the top 10 of 56 tested
+# combinations. Re-run the sweep periodically — markets drift.
+ATR_SL_MULT    = 1.0    # stop loss = 1.0x ATR below/above entry
+ATR_TP_MULT    = 3.0    # take profit = 3x ATR  →  1:3 R:R
 PARTIAL_R      = 1.5    # partial profits at 1.5R
 MIN_RR         = 2.0    # reject trades with < 1:2 R:R
 
