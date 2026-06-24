@@ -178,12 +178,21 @@ daily-loss or max-drawdown limit.
 Break & Retest setups switched to limit orders at the actual setup level instead of chasing
 market price (see below), win rate jumped from an earlier-measured ~32-33% to **52-66% on
 major forex pairs** (EURUSD 66%, GBPUSD 60%, GBPJPY 54%, USDJPY 52%), all with positive
-expectancy. Gold lags at **38%** — still positive (avg +0.14R/trade) but the weakest of the
-basket. `core/trading/optimize.py` runs a parameter sweep (confidence threshold, confluence
-requirement, SL/TP multipliers) against real history to find better-performing
+expectancy. `core/trading/optimize.py` runs a parameter sweep (confidence threshold,
+confluence requirement, SL/TP multipliers) against real history to find better-performing
 configurations — it does **not** touch risk management (sizing/daily-loss lock/stop loss),
-only which setups the signal engine treats as good enough to act on. Numbers drift as
-markets change — run `/backtest` yourself before trusting any of this on a live account.
+only which setups the signal engine treats as good enough to act on. A sweep across 5 majors
+found `ATR_SL_MULT=1.0` (current default, was 1.5) clearly best on the basket as a whole:
++0.93R/trade average across 384 trades. Numbers drift as markets change — run `/backtest`
+yourself before trusting any of this on a live account.
+
+**Known limitation — gold needs a tighter stop than the global default:** a gold-specific
+sweep (192 settings, GC=F only) found `ATR_SL_MULT=0.75` outperforms the global 1.0 default
+for gold specifically (35.9% win rate, +0.80R/trade, vs gold's result under the global
+setting). `signal_engine.py`'s constants are global — there's no per-symbol override
+mechanism yet. Building one properly (threading symbol-specific params through
+`score_signal()` → `market_monitor._analyze()`) is a real architecture change, not a
+config tweak — left as a documented next step rather than rushed.
 
 **Known limitation:** `/lessons` blocking is currently global per setup type, not
 per-symbol — a setup performing well on one instrument and badly on another will be
