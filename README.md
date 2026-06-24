@@ -186,13 +186,13 @@ found `ATR_SL_MULT=1.0` (current default, was 1.5) clearly best on the basket as
 +0.93R/trade average across 384 trades. Numbers drift as markets change — run `/backtest`
 yourself before trusting any of this on a live account.
 
-**Known limitation — gold needs a tighter stop than the global default:** a gold-specific
-sweep (192 settings, GC=F only) found `ATR_SL_MULT=0.75` outperforms the global 1.0 default
-for gold specifically (35.9% win rate, +0.80R/trade, vs gold's result under the global
-setting). `signal_engine.py`'s constants are global — there's no per-symbol override
-mechanism yet. Building one properly (threading symbol-specific params through
-`score_signal()` → `market_monitor._analyze()`) is a real architecture change, not a
-config tweak — left as a documented next step rather than rushed.
+**Per-symbol tuning:** a gold-specific sweep (192 settings, GC=F only) found
+`ATR_SL_MULT=0.75` outperforms the global 1.0 default for gold specifically (35.9% win
+rate, +0.80R/trade). `score_signal()` accepts optional per-call overrides
+(`min_confluence`/`atr_sl_mult`/`atr_tp_mult`/`min_rr`) instead of only reading module
+constants, and `market_monitor.SYMBOL_OVERRIDES` maps a symbol to its override dict,
+applied automatically in `_analyze()`. Gold's override is live; add more entries as
+per-symbol sweeps justify them.
 
 **Known limitation:** `/lessons` blocking is currently global per setup type, not
 per-symbol — a setup performing well on one instrument and badly on another will be
