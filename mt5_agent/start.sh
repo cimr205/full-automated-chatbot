@@ -18,6 +18,19 @@ Xvfb :99 -screen 0 1024x768x16 &
 XVFB_PID=$!
 sleep 2
 
+# VNC so you can see the MT5 terminal and click "AutoTrading" ON once —
+# that toggle is a one-time GUI setting inside MT5 itself, not something
+# any command-line flag or .ini edit reliably controls. Without a password
+# set, x11vnc runs open — set VNC_PASSWORD in Railway and add a TCP proxy
+# (Settings → Networking → TCP Proxy → port 5900) to reach it.
+if [ -n "${VNC_PASSWORD:-}" ]; then
+  x11vnc -display :99 -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 &
+else
+  echo "ADVARSEL: VNC_PASSWORD ikke sat — x11vnc kører uden adgangskode."
+  x11vnc -display :99 -forever -shared -nopw -rfbport 5900 &
+fi
+VNC_PID=$!
+
 setup_wine() {
   mkdir -p "$WINEPREFIX"
   echo "=== [1/4] wineboot --init ==="
@@ -65,6 +78,19 @@ WINE_PYTHON="$(find "$WINEPREFIX" -iname 'python.exe' -not -path '*/venv/*' 2>/d
 if [ -z "$WINE_PYTHON" ]; then
   echo "FEJL: Kunne ikke finde Wine's python.exe efter opsætning."
   exit 1
+fi
+
+# Launch the MT5 terminal itself visibly (not just lazily via mt5.initialize()
+# inside a trade command) so it's there, logged in, and clickable over VNC
+# right away. Auto-login uses MT5_LOGIN/MT5_PASSWORD/MT5_SERVER if set.
+MT5_EXE="$(find "$WINEPREFIX" -iname 'terminal64.exe' 2>/dev/null | head -1)"
+if [ -n "$MT5_EXE" ]; then
+  if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ] && [ -n "${MT5_SERVER:-}" ]; then
+    wine "$MT5_EXE" "/login:${MT5_LOGIN}" "/password:${MT5_PASSWORD}" "/server:${MT5_SERVER}" &
+  else
+    wine "$MT5_EXE" &
+  fi
+  sleep 10
 fi
 
 wine "$WINE_PYTHON" -m mt5linux --host 0.0.0.0 -p "${MT5_LINUX_PORT:-18812}" &

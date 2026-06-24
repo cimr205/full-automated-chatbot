@@ -33,7 +33,7 @@ RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       xvfb wget ca-certificates cabextract unzip gnupg \
-      python3 python3-pip \
+      python3 python3-pip x11vnc \
  && mkdir -p /etc/apt/keyrings \
  && wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key \
  && wget -q -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources \
