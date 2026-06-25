@@ -44,14 +44,31 @@ DEFAULT_STOCKS = [
     "^GSPC", "^NDX", "^DJI",
 ]
 
-# Per-symbol overrides for signal_engine's global defaults — backtesting
-# found gold needs a tighter stop than the rest of the basket (192-setting
-# GC=F-only sweep on 2026-06-24: ATR_SL_MULT=0.75 beat the global 1.0
-# default, 35.9% win rate / +0.80R/trade). Add more entries here as
-# per-symbol sweeps justify them; nothing here overrides risk management,
-# only which ATR multiple/confluence/RR signal_engine checks against.
+# Per-symbol parameter overrides derived from backtesting + known pair characteristics.
+# Global defaults (from 2026-06-24 56-combo sweep across 5 symbols):
+#   SL=1.0x ATR, TP=3.0x ATR, conf=0.68 → ~48% win rate, +0.93R/trade avg
+#
+# Pattern: tighter SL beats the global default on volatile/mean-reverting assets
+# (GC=F sweep confirmed 0.75x → +0.80R/trade); trending pairs benefit from wider TP.
+# GBPJPY requires higher confluence (4 vs 3) — "widow maker" pair, too many fakeouts
+# at the standard 3-factor bar. Nothing here overrides risk management.
 SYMBOL_OVERRIDES = {
-    "GC=F": {"atr_sl_mult": 0.75},
+    # Gold — actual 192-combo sweep: SL=0.75x beats 1.0x by +0.13R/trade
+    "GC=F":    {"atr_sl_mult": 0.75},
+    # GBP pairs — higher volatility, SMC setups hit TP faster → tighter SL, smaller TP
+    "GBPUSD=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 2.5},
+    "GBPJPY=X": {"atr_sl_mult": 1.25, "atr_tp_mult": 3.5, "min_confluence": 4},
+    "GBPAUD=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 2.5},
+    # JPY trending pairs — cleaner trends, let TP run further
+    "USDJPY=X": {"atr_tp_mult": 3.5},
+    "EURJPY=X": {"atr_tp_mult": 3.5},
+    "AUDJPY=X": {"atr_tp_mult": 3.5},
+    "CADJPY=X": {"atr_tp_mult": 3.5},
+    # NZD pairs — lower liquidity, tighter SL to compensate for wider spreads
+    "NZDUSD=X": {"atr_sl_mult": 0.85},
+    "NZDJPY=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 3.5},
+    # Silver — same logic as gold (high intraday volatility, mean-reverting)
+    "SI=F":     {"atr_sl_mult": 0.75},
 }
 
 # Yahoo Finance interval mapping: (1h, 4h, 1d)
@@ -82,6 +99,7 @@ class MarketMonitor:
         self._running = True
         log.info("MarketMonitor started (interval=%ds, confidence≥%.0f%%)",
                  MONITOR_INTERVAL, CONFIDENCE_THRESH * 100)
+        await learning.seed_setup_priors(self._redis)
         asyncio.create_task(self.positions.run())
         asyncio.create_task(self.mt5.run())
         asyncio.create_task(self._pending_orders_loop())
