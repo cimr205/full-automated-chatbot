@@ -94,6 +94,8 @@ fi
 MT5_EXE="$(find "$WINEPREFIX" -iname 'terminal64.exe' 2>/dev/null | head -1)"
 if [ -n "$MT5_EXE" ]; then
   MT5_CONFIG_INI="/tmp/mt5_startup.ini"
+  # MT5 ini files use 1/0, not true/false — "true" is silently ignored and
+  # leaves AutoTrading off, which produces error 10027 on every order_send.
   {
     echo "[Common]"
     if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ] && [ -n "${MT5_SERVER:-}" ]; then
@@ -104,16 +106,36 @@ if [ -n "$MT5_EXE" ]; then
     echo "AutoConfiguration=false"
     echo ""
     echo "[Experts]"
-    echo "AllowLiveTrading=true"
-    echo "AllowDllImport=true"
-    echo "AllowImport=true"
-    echo "Enabled=true"
+    echo "AllowLiveTrading=1"
+    echo "AllowDllImport=1"
+    echo "AllowImport=1"
+    echo "Enabled=1"
     echo "Account=ALL"
-    echo "Confirm=false"
+    echo "Confirm=0"
   } > "$MT5_CONFIG_INI"
 
-  wine "$MT5_EXE" "/config:$(winepath -w "$MT5_CONFIG_INI")" &
-  sleep 10
+  # Use hardcoded Z: path — winepath can fail silently if wineserver isn't
+  # fully up yet, which would give MT5 a malformed /config: argument.
+  wine "$MT5_EXE" "/config:Z:\\tmp\\mt5_startup.ini" &
+  MT5_PID=$!
+
+  # Belt-and-suspenders: after MT5 has had time to create its data directory,
+  # patch the persisted terminal.ini directly so AutoTrading survives restarts
+  # even if the /config: flag is ignored by this MT5 build/broker combo.
+  sleep 20
+  TERMINAL_INI=$(find "$WINEPREFIX/drive_c" -name "terminal.ini" 2>/dev/null | head -1)
+  if [ -n "$TERMINAL_INI" ]; then
+    echo "Patcher terminal.ini for AutoTrading: $TERMINAL_INI"
+    if grep -q "^\[Experts\]" "$TERMINAL_INI"; then
+      sed -i '/^\[Experts\]/,/^\[/{s/^Enabled=.*/Enabled=1/}' "$TERMINAL_INI"
+      grep -q "^Enabled=" "$TERMINAL_INI" || sed -i '/^\[Experts\]/a Enabled=1' "$TERMINAL_INI"
+      sed -i '/^\[Experts\]/,/^\[/{s/^AllowLiveTrading=.*/AllowLiveTrading=1/}' "$TERMINAL_INI"
+    else
+      printf '\n[Experts]\nEnabled=1\nAllowLiveTrading=1\nAllowDllImport=1\nAllowImport=1\n' >> "$TERMINAL_INI"
+    fi
+  else
+    echo "ADVARSEL: terminal.ini ikke fundet endnu — /config: er eneste forsøg."
+  fi
 fi
 
 wine "$WINE_PYTHON" -m mt5linux --host 0.0.0.0 -p "${MT5_LINUX_PORT:-18812}" &
