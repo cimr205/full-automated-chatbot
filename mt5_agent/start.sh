@@ -18,11 +18,13 @@ Xvfb :99 -screen 0 1024x768x16 &
 XVFB_PID=$!
 sleep 2
 
-# VNC so you can see the MT5 terminal and click "AutoTrading" ON once —
-# that toggle is a one-time GUI setting inside MT5 itself, not something
-# any command-line flag or .ini edit reliably controls. Without a password
-# set, x11vnc runs open — set VNC_PASSWORD in Railway and add a TCP proxy
-# (Settings → Networking → TCP Proxy → port 5900) to reach it.
+# VNC kept as a diagnostic fallback — AutoTrading is now enabled at launch
+# via the /config: ini below (see MT5_CONFIG_INI), so manual clicking
+# shouldn't be needed. If MT5 still rejects orders with "AutoTrading
+# disabled by client", connect via VNC to see what the terminal is actually
+# doing. Without a password set, x11vnc runs open — set VNC_PASSWORD in
+# Railway and add a TCP proxy (Settings → Networking → TCP Proxy → port
+# 5900) to reach it.
 if [ -n "${VNC_PASSWORD:-}" ]; then
   x11vnc -display :99 -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 &
 else
@@ -81,15 +83,36 @@ if [ -z "$WINE_PYTHON" ]; then
 fi
 
 # Launch the MT5 terminal itself visibly (not just lazily via mt5.initialize()
-# inside a trade command) so it's there, logged in, and clickable over VNC
-# right away. Auto-login uses MT5_LOGIN/MT5_PASSWORD/MT5_SERVER if set.
+# inside a trade command) so it's there, logged in, and ready right away.
+#
+# AutoTrading ("Algo Trading" toggle) is a global flag the terminal reads
+# from a /config: ini file at startup — it does NOT need to be clicked by
+# hand in the GUI. This is the same mechanism MT5 strategy-tester farms use
+# to run headless. [Experts] Enabled=true is the AutoTrading button itself;
+# AllowLiveTrading/AllowDllImport are the per-EA permissions an EA would
+# otherwise need granted via its own Properties dialog.
 MT5_EXE="$(find "$WINEPREFIX" -iname 'terminal64.exe' 2>/dev/null | head -1)"
 if [ -n "$MT5_EXE" ]; then
-  if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ] && [ -n "${MT5_SERVER:-}" ]; then
-    wine "$MT5_EXE" "/login:${MT5_LOGIN}" "/password:${MT5_PASSWORD}" "/server:${MT5_SERVER}" &
-  else
-    wine "$MT5_EXE" &
-  fi
+  MT5_CONFIG_INI="/tmp/mt5_startup.ini"
+  {
+    echo "[Common]"
+    if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ] && [ -n "${MT5_SERVER:-}" ]; then
+      echo "Login=${MT5_LOGIN}"
+      echo "Password=${MT5_PASSWORD}"
+      echo "Server=${MT5_SERVER}"
+    fi
+    echo "AutoConfiguration=false"
+    echo ""
+    echo "[Experts]"
+    echo "AllowLiveTrading=true"
+    echo "AllowDllImport=true"
+    echo "AllowImport=true"
+    echo "Enabled=true"
+    echo "Account=ALL"
+    echo "Confirm=false"
+  } > "$MT5_CONFIG_INI"
+
+  wine "$MT5_EXE" "/config:$(winepath -w "$MT5_CONFIG_INI")" &
   sleep 10
 fi
 
