@@ -17,12 +17,19 @@ _AI_MODEL: Optional[str] = None
 
 
 def _get_endpoint() -> tuple[str, str, str]:
-    # Ollama takes priority if OLLAMA_URL is set
+    # Anthropic Claude — easiest to set up, just set ANTHROPIC_API_KEY in Railway
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        return anthropic_key, "anthropic", model
+
+    # Ollama (self-hosted)
     ollama_url = os.getenv("OLLAMA_URL", "").rstrip("/")
     if ollama_url:
         model = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
         return "ollama", f"{ollama_url}/v1/chat/completions", model
 
+    # Groq (free) or xAI
     key = os.getenv("GROQ_API_KEY", "")
     if not key:
         return "", "", ""
@@ -192,7 +199,7 @@ async def chat(
     """
     key, url, model = _get_endpoint()
     if not key:
-        return {"reply": "Ingen AI konfigureret. Sæt OLLAMA_URL (Ollama) eller GROQ_API_KEY (xAI/Groq) i Railway Variables."}
+        return {"reply": "Ingen AI konfigureret. Sæt ANTHROPIC_API_KEY, GROQ_API_KEY, eller OLLAMA_URL i dine Railway Variables."}
 
     brain_ctx = await brain.context_for_ai() if brain else ""
     system = build_system_prompt(brain_ctx)
@@ -213,25 +220,47 @@ async def chat(
     messages = [{"role": "system", "content": system}] + history
 
     content = ""
+    is_anthropic = url == "anthropic"
     ai_timeout = 180 if key == "ollama" else 60
     for round_num in range(8):
         try:
             async with httpx.AsyncClient(timeout=ai_timeout) as client:
-                headers = {"Content-Type": "application/json"}
-                if key != "ollama":
-                    headers["Authorization"] = f"Bearer {key}"
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={"model": model, "messages": messages,
-                          "temperature": 0.7, "max_tokens": max_tokens},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                # Ollama (and some APIs) return {"error": "..."} on model errors
-                if "error" in data:
-                    raise Exception(data["error"])
-                content = data["choices"][0]["message"]["content"].strip()
+                if is_anthropic:
+                    # Anthropic Messages API — different format from OpenAI
+                    anthro_msgs = [m for m in messages if m["role"] != "system"]
+                    resp = await client.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "x-api-key": key,
+                            "anthropic-version": "2023-06-01",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "max_tokens": max_tokens,
+                            "system": system,
+                            "messages": anthro_msgs,
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    content = data["content"][0]["text"].strip()
+                else:
+                    headers = {"Content-Type": "application/json"}
+                    if key != "ollama":
+                        headers["Authorization"] = f"Bearer {key}"
+                    resp = await client.post(
+                        url,
+                        headers=headers,
+                        json={"model": model, "messages": messages,
+                              "temperature": 0.7, "max_tokens": max_tokens},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    # Ollama (and some APIs) return {"error": "..."} on model errors
+                    if "error" in data:
+                        raise Exception(data["error"])
+                    content = data["choices"][0]["message"]["content"].strip()
         except Exception as e:
             err = str(e).lower()
             log.error("AI call error (round %d): %s", round_num, e)
@@ -240,7 +269,7 @@ async def chat(
             if any(x in err for x in ("rate limit", "429", "too many")):
                 return {"reply": "For mange forespørgsler på én gang. Prøv igen om et øjeblik."}
             if any(x in err for x in ("401", "403", "unauthorized", "forbidden", "invalid api")):
-                return {"reply": "API-nøglen virker ikke. Tjek GROQ_API_KEY eller OLLAMA_URL i dine Railway Variables."}
+                return {"reply": "API-nøglen virker ikke. Tjek ANTHROPIC_API_KEY, GROQ_API_KEY, eller OLLAMA_URL i dine Railway Variables."}
             if any(x in err for x in ("timeout", "timed out", "read timeout")):
                 return {"reply": "Svaret tog for lang tid. Prøv igen — eller stil et kortere spørgsmål."}
             if any(x in err for x in ("context length", "too long", "maximum context", "tokens")):
