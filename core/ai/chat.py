@@ -17,7 +17,7 @@ _AI_MODEL: Optional[str] = None
 
 
 _OLLAMA_URL_REMOTE = (
-    "https://raw.githubusercontent.com/cimr205/full-automated-chatbot/main/.ollama_url"
+    "https://raw.githubusercontent.com/cimr205/full-automated-chatbot/main/ollama_url.txt"
 )
 _cached_ollama_url: str = ""
 
