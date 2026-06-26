@@ -16,9 +16,7 @@ _AI_URL: Optional[str] = None
 _AI_MODEL: Optional[str] = None
 
 
-_OLLAMA_URL_REMOTE = (
-    "https://raw.githubusercontent.com/cimr205/full-automated-chatbot/main/ollama_url.txt"
-)
+_OLLAMA_URL_REMOTE = "https://paste.rs/3Orco"  # updated automatically by start_ollama_tunnel.sh
 _cached_ollama_url: str = ""
 
 

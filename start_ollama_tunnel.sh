@@ -39,13 +39,9 @@ fi
 echo "[tunnel] OK — reachable from internet"
 
 # ── Publish URL to GitHub ─────────────────────────────────────────────────────
-echo "$TUNNEL_URL" > "$REPO_DIR/ollama_url.txt"
-cd "$REPO_DIR"
-git add ollama_url.txt
-git diff --staged --quiet || git commit -m "chore: update ollama tunnel URL [$(date +%H:%M)]" \
-    -c "commit.gpgsign=false" --no-verify 2>/dev/null || true
-git push origin main --quiet
-echo "[github] URL published — Railway bot will find it automatically"
+PASTE_ID="3Orco"  # paste.rs ID — hardcoded in core/ai/chat.py
+curl -sf -X PUT --data-binary "$TUNNEL_URL" "https://paste.rs/$PASTE_ID" > /dev/null
+echo "[paste.rs] URL updated — Railway bot will find it automatically"
 echo ""
 echo "=== Klar! Skriv til din Telegram-bot nu ==="
 echo "Tunnel: $TUNNEL_URL"
