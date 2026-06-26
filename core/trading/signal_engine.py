@@ -13,6 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .indicators import rsi, ema, macd, bollinger, atr, volume_ratio, stochastic
+from . import asian_range as _asian_range
 
 CET           = ZoneInfo("Europe/Paris")
 MIN_CONFLUENCE = 3      # minimum 3 independent factors
@@ -257,6 +258,7 @@ def score_signal(
     ohlcv_1h:  list,
     ohlcv_4h:  list | None = None,
     ohlcv_1d:  list | None = None,
+    ohlcv_15m: list | None = None,   # 15-minute data for entry timing + Asian range
     at:        datetime | None = None,   # backtesting: pass the candle's own timestamp
     min_confluence: float | None = None,  # per-symbol overrides (see market_monitor.SYMBOL_OVERRIDES)
     atr_sl_mult:    float | None = None,
@@ -308,6 +310,15 @@ def score_signal(
     e50_val  = base.get("e50", price)
     e200_val = base.get("e200", price)
 
+    # ── Asian Range Sweep (15m) — highest priority setup for gold ──────────────
+    # When 15m data is available, check for the classic London-open liquidity grab
+    # first. If found, it overrides ATR-based SL/TP with sweep-wick levels.
+    asian_sweep     = None
+    custom_sl       = None   # set if Asian sweep overrides ATR-based SL
+    custom_tp       = None
+    if ohlcv_15m and len(ohlcv_15m) >= 10:
+        asian_sweep = _asian_range.detect(ohlcv_15m, at=at)
+
     # ── Setup detection on 1h (primary execution timeframe) ──
     # "type" is a stable category (e.g. "bullish_fvg") used for grouping/learning;
     # "label" is the human-readable string with the specific price levels for display.
@@ -317,6 +328,15 @@ def score_signal(
     setup_kinds = []   # stable categories
     setup_limit_price = None
     LIMIT_ORDER_KINDS = {"bullish_fvg", "bearish_fvg", "bullish_break_retest", "bearish_break_retest"}
+
+    # Inject Asian sweep as the primary setup (before 1H detectors)
+    if asian_sweep and asian_sweep["direction"] == direction:
+        setups.append(asian_sweep["label"])
+        setup_kinds.append(asian_sweep["type"])
+        custom_sl = asian_sweep["sl_level"]
+        custom_tp = asian_sweep["tp_level"]
+        all_reasons.insert(0, f"Asian Range Sweep — {asian_sweep['type'].split('_')[0].capitalize()} setup ({asian_sweep['rr']:.1f}:1 R:R)")
+
     for detector in (detect_fvg, detect_break_retest, detect_liquidity_grab, detect_trend_pullback):
         result = detector(ohlcv_1h)
         if result:
@@ -329,7 +349,7 @@ def score_signal(
 
     setup_type  = setup_kinds[0] if setup_kinds else None
     setup_label = setups[0] if setups else None
-    order_type  = "limit" if (setup_type in LIMIT_ORDER_KINDS and setup_limit_price) else "market"
+    order_type  = "limit" if (setup_type in LIMIT_ORDER_KINDS and setup_limit_price and not asian_sweep) else "market"
     entry_price = setup_limit_price if order_type == "limit" else price
 
     # ── Price levels (relative to entry_price — the limit level if pending, else market) ──
@@ -337,13 +357,13 @@ def score_signal(
         return {**no_signal, "reasons": ["Ugyldig entry-pris (0)"]}
 
     if direction == "long":
-        stop_loss   = entry_price - atr_sl_mult * atr_val
-        take_profit = entry_price + atr_tp_mult * atr_val
-        partial_tp  = entry_price + PARTIAL_R   * atr_val
+        stop_loss   = custom_sl if custom_sl else entry_price - atr_sl_mult * atr_val
+        take_profit = custom_tp if custom_tp else entry_price + atr_tp_mult * atr_val
+        partial_tp  = entry_price + PARTIAL_R * atr_val
     else:
-        stop_loss   = entry_price + atr_sl_mult * atr_val
-        take_profit = entry_price - atr_tp_mult * atr_val
-        partial_tp  = entry_price - PARTIAL_R   * atr_val
+        stop_loss   = custom_sl if custom_sl else entry_price + atr_sl_mult * atr_val
+        take_profit = custom_tp if custom_tp else entry_price - atr_tp_mult * atr_val
+        partial_tp  = entry_price - PARTIAL_R * atr_val
 
     # Validate levels are on the correct sides before the checklist
     if direction == "long" and not (stop_loss < entry_price < take_profit):

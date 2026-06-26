@@ -131,6 +131,9 @@ async def seed_setup_priors(redis: aioredis.Redis) -> None:
         # Pullbacks — 0% WR in backtest → seed as blocked
         "bullish_pullback":     {"wins": 1,  "losses": 24},  # 4% → BLOCKED
         "bearish_pullback":     {"wins": 1,  "losses": 24},  # 4% → BLOCKED
+        # Asian range sweep — our primary gold setup, seeded optimistically
+        "bullish_asian_sweep":  {"wins": 8,  "losses": 4},   # 67% — strong institutional pattern
+        "bearish_asian_sweep":  {"wins": 8,  "losses": 4},
     }
     for setup, counts in priors.items():
         key = f"{KEY_PREFIX}{setup}"

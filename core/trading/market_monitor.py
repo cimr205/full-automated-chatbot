@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Market Monitor — continuously scans Forex and Stock/Index symbols,
 generates high-confidence signals, and pushes Telegram alerts via Redis.
@@ -7,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone, time as dtime
 
@@ -20,29 +23,31 @@ from .risk_manager import RiskManager
 from . import reporting
 from . import chart
 from . import learning
+from . import asian_range as _asian_range
+from . import news_filter
 
 log = logging.getLogger(__name__)
 
-MONITOR_INTERVAL   = int(os.getenv("MONITOR_INTERVAL", "600"))   # 10 min default
-CONFIDENCE_THRESH  = float(os.getenv("SIGNAL_CONFIDENCE", "0.68"))
-SIGNAL_COOLDOWN    = int(os.getenv("SIGNAL_COOLDOWN", "14400"))   # 4h per symbol
-CONFIRM_BAND       = float(os.getenv("SIGNAL_CONFIRM_BAND", "0.07"))   # borderline zone above the floor
+MONITOR_INTERVAL   = int(os.getenv("MONITOR_INTERVAL", "900"))    # 15 min — matches 15m timeframe
+CONFIDENCE_THRESH  = float(os.getenv("SIGNAL_CONFIDENCE", "0.72")) # raised: we only want the best
+SIGNAL_COOLDOWN    = int(os.getenv("SIGNAL_COOLDOWN", "86400"))    # 24h — one trade per day
+CONFIRM_BAND       = float(os.getenv("SIGNAL_CONFIRM_BAND", "0.07"))
 PENDING_KEY_PREFIX = "trading:pending:"
-PENDING_TTL        = MONITOR_INTERVAL * 2   # expire if not reconfirmed within ~2 cycles
+PENDING_TTL        = MONITOR_INTERVAL * 2
+DAILY_TRADE_CAP    = 1   # one perfect trade per day
 
 # ── Default watchlists ────────────────────────────────────────────────────────
 
-DEFAULT_FOREX = [
-    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "GBPJPY=X",
-    "AUDUSD=X", "USDCHF=X", "USDCAD=X", "EURGBP=X",
-    "EURJPY=X", "NZDUSD=X", "AUDJPY=X", "NZDJPY=X",
-    "EURAUD=X", "GBPAUD=X", "AUDNZD=X", "CHFJPY=X", "CADJPY=X",
-    "GC=F",   # Gold futures — Yahoo has no "XAUUSD=X"; this is the real, working ticker
-]
-DEFAULT_STOCKS = [
-    "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
-    "^GSPC", "^NDX", "^DJI",
-]
+# XAUUSD only — one market, master it.
+# GC=F is the Yahoo Finance ticker for Gold futures (closest to XAUUSD spot).
+# MT5 uses XAUUSD — see MT5_SYMBOL_MAP below.
+DEFAULT_FOREX  = ["GC=F"]
+DEFAULT_STOCKS = []
+
+# Map Yahoo tickers to MT5 symbol names
+MT5_SYMBOL_MAP = {
+    "GC=F": "XAUUSD",
+}
 
 # Per-symbol parameter overrides derived from backtesting + known pair characteristics.
 # Global defaults (from 2026-06-24 56-combo sweep across 5 symbols):
@@ -71,15 +76,17 @@ SYMBOL_OVERRIDES = {
     "SI=F":     {"atr_sl_mult": 0.75},
 }
 
-# Yahoo Finance interval mapping: (1h, 4h, 1d)
+# Yahoo Finance interval mapping
 _YF_INTERVAL = {
-    "1h": "1h",
-    "4h": "1h",   # YF has no 4h; we resample 1h → 4h
-    "1d": "1d",
+    "15m": "15m",
+    "1h":  "1h",
+    "4h":  "1h",  # YF has no 4h; we resample 1h → 4h
+    "1d":  "1d",
 }
 _YF_PERIOD = {
-    "1h": "60d",
-    "1d": "2y",
+    "15m": "5d",   # YF limits 15m to 60 days but 5d is enough for Asian range today
+    "1h":  "60d",
+    "1d":  "2y",
 }
 
 
@@ -89,8 +96,10 @@ class MarketMonitor:
         self._running  = False
         self._last_signal: dict[str, dict] = {}
         self._last_snapshot: dict[str, dict] = {}   # for the per-cycle watchlist chart
+        self._mt5_offline_since: float | None = None   # timestamp when MT5 first went offline
         self.positions = PositionManager(redis)
         self.mt5       = MT5Bridge(redis)
+        self.positions._mt5 = self.mt5   # inject for auto-breakeven
         self.risk      = RiskManager(redis, db=db)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -103,6 +112,9 @@ class MarketMonitor:
         asyncio.create_task(self.positions.run())
         asyncio.create_task(self.mt5.run())
         asyncio.create_task(self._pending_orders_loop())
+        # Give MT5Bridge a moment to connect before reconciling
+        await asyncio.sleep(5)
+        asyncio.create_task(self._reconcile_positions())
         while self._running:
             try:
                 await self._scan_all()
@@ -176,8 +188,9 @@ class MarketMonitor:
         # Available on demand via /chart instead (see _send_watchlist_chart).
 
     async def _analyze(self, symbol: str, market: str):
-        # Fetch 1h data (used as base + resampled to 4h)
-        ohlcv_1h = await self._fetch(symbol, "1h")
+        # Fetch all timeframes: 15m (entry), 1h (structure), 4h + daily (bias)
+        ohlcv_15m = await self._fetch(symbol, "15m")
+        ohlcv_1h  = await self._fetch(symbol, "1h")
         if not ohlcv_1h or len(ohlcv_1h) < 50:
             log.debug("[%s] Not enough 1h data", symbol)
             return
@@ -188,11 +201,16 @@ class MarketMonitor:
         overrides = SYMBOL_OVERRIDES.get(symbol, {})
         signal = score_signal(
             ohlcv_1h, ohlcv_4h, ohlcv_1d,
+            ohlcv_15m=ohlcv_15m,
             min_confluence=overrides.get("min_confluence"),
             atr_sl_mult=overrides.get("atr_sl_mult"),
             atr_tp_mult=overrides.get("atr_tp_mult"),
             min_rr=overrides.get("min_rr"),
         )
+
+        # Annotate signal with MT5 symbol name (may differ from Yahoo ticker)
+        mt5_sym = MT5_SYMBOL_MAP.get(symbol, symbol)
+        signal["mt5_symbol"] = mt5_sym
 
         # Always journal the scan (even if signal is rejected)
         await self._journal(symbol, market, signal, published=False)
@@ -223,6 +241,13 @@ class MarketMonitor:
             log.debug("[%s] Confidence too low: %.0f%%", symbol, confidence * 100)
             return
 
+        # News filter — no trading 45 min around high-impact USD/Gold events
+        news_blocked, news_reason = await news_filter.is_blocked_by_news()
+        if news_blocked:
+            log.info("[%s] News filter: %s", symbol, news_reason)
+            await self._notify(f"📰 {news_reason}")
+            return
+
         # Risk gate — never open a new trade while paused or locked
         can_trade, lock_reason = await self.risk.check_can_trade()
         if not can_trade:
@@ -230,8 +255,9 @@ class MarketMonitor:
             return
 
         # Learning gate — setups with a clearly bad real track record are blocked
+        # Checks per-symbol first (more specific), then global
         setup_type = signal.get("setup_type")
-        if await learning.is_blocked(self._redis, setup_type):
+        if await learning.is_blocked(self._redis, setup_type, symbol=symbol):
             log.info("[%s] Setup '%s' is blocked by learning — skipping", symbol, setup_type)
             return
 
@@ -241,9 +267,9 @@ class MarketMonitor:
             log.info("[%s] Borderline signal (%.0f%%) — waiting for re-confirmation", symbol, confidence * 100)
             return
 
-        # Check daily signal cap (max 5 signals per day across all symbols)
+        # Daily cap: 1 perfect trade per day — no second-guessing once we're in
         if await self._daily_cap_reached():
-            log.info("Daily signal cap reached — skipping %s", symbol)
+            log.info("Daily cap reached (1 trade/day) — skipping %s", symbol)
             return
 
         # Cooldown: don't repeat same direction within SIGNAL_COOLDOWN seconds
@@ -264,18 +290,44 @@ class MarketMonitor:
         # success — never claim a trade exists when MT5 never placed it.
         mt5_online = await self.mt5.ping()
         if not mt5_online:
-            await self._notify_mt5_not_executed(
-                symbol, signal, "MT5 Worker er offline — ingen rigtig trade blev åbnet."
-            )
-            await self._journal(symbol, market, signal, published=False)
+            await self._handle_mt5_offline_signal(symbol, signal)
             return
 
-        trade_id = f"trade_{uuid.uuid4().hex[:8]}"
+        # MT5 came back online — clear the offline tracker and notify once
+        if self._mt5_offline_since is not None:
+            offline_mins = int((time.time() - self._mt5_offline_since) / 60)
+            self._mt5_offline_since = None
+            # Clear per-threshold alert keys so escalation resets on next outage
+            for threshold in [10, 30, 60, 120]:
+                await self._redis.delete(f"trading:mt5:offline_alert_{threshold}")
+            await self._notify(
+                f"✅ *MT5 Worker online igen*\n"
+                f"Var offline i ca. {offline_mins} minutter. Handel genoptaget."
+            )
+
+        # Validate SL/TP are on the correct sides before sending anything to MT5
+        entry = signal["price"]
+        sl    = signal["stop_loss"]
+        tp    = signal["take_profit"]
+        if direction == "long" and not (sl < entry < tp):
+            log.error("[%s] Invalid levels for LONG: entry=%s sl=%s tp=%s — skipping", symbol, entry, sl, tp)
+            return
+        if direction == "short" and not (tp < entry < sl):
+            log.error("[%s] Invalid levels for SHORT: entry=%s sl=%s tp=%s — skipping", symbol, entry, sl, tp)
+            return
+        if entry <= 0 or sl <= 0 or tp <= 0:
+            log.error("[%s] Zero price level detected — skipping", symbol)
+            return
+
+        trade_id  = f"trade_{uuid.uuid4().hex[:8]}"
+        mt5_sym   = signal.get("mt5_symbol", symbol)   # XAUUSD in MT5, GC=F on Yahoo
         try:
-            volume = await self._sized_volume(symbol, signal["price"], signal["stop_loss"])
+            volume = await self._sized_volume(mt5_sym, signal["price"], signal["stop_loss"])
+            if volume is None:
+                log.warning("[%s] Volume sizing unavailable — using default lot", mt5_sym)
             mt5_result = await self.mt5.send_open(
                 trade_id=trade_id,
-                symbol=symbol,
+                symbol=mt5_sym,
                 direction=direction,
                 stop_loss=signal["stop_loss"],
                 take_profit=signal["take_profit"],
@@ -512,6 +564,124 @@ class MarketMonitor:
             "task_id": f"mt5_not_executed_{symbol}",
         }))
 
+    async def _handle_mt5_offline_signal(self, symbol: str, signal: dict):
+        """Send escalating alerts when MT5 is offline so the user doesn't miss it."""
+        now = time.time()
+        if self._mt5_offline_since is None:
+            self._mt5_offline_since = now
+            # First detection — immediate alert
+            await self._notify_mt5_not_executed(
+                symbol, signal,
+                "MT5 Worker er offline — ingen rigtig trade åbnet."
+            )
+            return
+
+        offline_mins = (now - self._mt5_offline_since) / 60
+        # Escalating alerts at 10, 30, 60, 120 minute marks (each fires once)
+        for threshold in [10, 30, 60, 120]:
+            if offline_mins >= threshold:
+                alert_key = f"trading:mt5:offline_alert_{threshold}"
+                if not await self._redis.get(alert_key):
+                    await self._redis.set(alert_key, "1", ex=3600 * 6)
+                    await self._notify(
+                        f"⚠️ *MT5 Worker stadig offline*\n"
+                        f"Det er nu *{int(offline_mins)} minutter* siden forbindelsen gik tabt.\n"
+                        f"Handler udføres ikke. Tjek mt5_worker.py på din PC/VPS."
+                    )
+
+    async def _reconcile_positions(self):
+        """Sync Redis position records with what MT5 actually has open.
+
+        Runs once at startup (after MT5Bridge has had time to connect).
+        Detects ghost positions (traded on MT5, missing from Redis after a crash)
+        and stale records (in Redis but no longer on MT5 — manually closed).
+        """
+        try:
+            if not await self.mt5.ping():
+                log.info("Reconcile skipped — MT5 offline at startup")
+                return
+
+            mt5_data = await self.mt5.get_open_positions()
+            if "error" in mt5_data:
+                log.warning("Reconcile: could not get MT5 positions: %s", mt5_data["error"])
+                return
+
+            mt5_by_ticket = {p["ticket"]: p for p in mt5_data.get("positions", [])}
+            redis_positions = await self.positions.list_open()
+
+            # Build ticket → trade from Redis
+            redis_by_ticket: dict[int, dict] = {}
+            for trade in redis_positions:
+                trade_id  = trade["trade_id"]
+                ticket_raw = await self._redis.hget("trading:mt5:tickets", trade_id)
+                if ticket_raw:
+                    ticket = json.loads(ticket_raw).get("ticket")
+                    if ticket:
+                        redis_by_ticket[ticket] = trade
+
+            discrepancies = 0
+
+            # 1. Redis records that no longer exist on MT5 → mark closed
+            for ticket, trade in redis_by_ticket.items():
+                if ticket not in mt5_by_ticket:
+                    discrepancies += 1
+                    log.warning("Reconcile: trade %s (ticket %s) not on MT5 — marking closed",
+                                trade["trade_id"], ticket)
+                    closed = await self.positions.close_trade(
+                        trade["trade_id"], trade["entry"], reason="closed_externally"
+                    )
+                    if closed:
+                        await self._notify(
+                            f"⚠️ *Position afstemning*\n"
+                            f"`{trade['symbol']}` {trade['direction'].upper()} "
+                            f"(ticket {ticket}) eksisterer ikke på MT5 — "
+                            f"markeret som lukket. Tjek terminalen for den reelle lukkepris og P&L."
+                        )
+
+            # 2. MT5 positions we have no Redis record for → re-register
+            redis_tickets = set(redis_by_ticket.keys())
+            for ticket, pos in mt5_by_ticket.items():
+                if ticket not in redis_tickets:
+                    discrepancies += 1
+                    log.warning("Reconcile: MT5 ticket %s (%s) not in Redis — re-registering",
+                                ticket, pos["symbol"])
+                    recovery_id = f"recovered_{ticket}"
+                    sl_guess = pos["sl"] or pos["price_open"] * 0.995
+                    tp_guess = pos["tp"] or pos["price_open"] * 1.01
+                    await self.positions.open_trade(
+                        symbol=pos["symbol"], market="forex",
+                        direction=pos["direction"],
+                        entry=pos["price_open"],
+                        stop_loss=sl_guess,
+                        take_profit=tp_guess,
+                        source="recovered",
+                        trade_id=recovery_id,
+                    )
+                    await self._redis.hset(
+                        "trading:mt5:tickets", recovery_id,
+                        json.dumps({"ticket": ticket})
+                    )
+                    await self._notify(
+                        f"⚠️ *Position genfundet*\n"
+                        f"MT5 ticket {ticket} ({pos['symbol']} {pos['direction'].upper()}) "
+                        f"manglede i systemet — genregistreret som `{recovery_id}`.\n"
+                        f"Opdater SL/TP manuelt med /close hvis nødvendigt."
+                    )
+
+            if discrepancies:
+                log.info("Reconcile: %d uoverensstemmelser rettet", discrepancies)
+            else:
+                log.info("Reconcile: ingen uoverensstemmelser fundet (%d positioner OK)",
+                         len(redis_by_ticket))
+
+        except Exception as e:
+            log.error("Position reconciliation fejlede: %s", e)
+
+    async def _notify(self, message: str):
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": message, "parse_mode": "Markdown", "task_id": "market_monitor",
+        }))
+
     async def _journal(self, symbol: str, market: str, signal: dict, published: bool):
         try:
             entry = {
@@ -535,10 +705,10 @@ class MarketMonitor:
         except Exception as e:
             log.warning("Journal write error: %s", e)
 
-    async def _daily_cap_reached(self, cap: int = 5) -> bool:
+    async def _daily_cap_reached(self) -> bool:
         today = datetime.utcnow().strftime("%Y-%m-%d")
         count = await self._redis.get(f"trading:daily_signals:{today}")
-        return int(count or 0) >= cap
+        return int(count or 0) >= DAILY_TRADE_CAP
 
     async def _increment_daily_count(self):
         today = datetime.utcnow().strftime("%Y-%m-%d")

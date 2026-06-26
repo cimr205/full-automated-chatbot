@@ -96,16 +96,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     await update.message.reply_text(
-        "*Autonomous Execution System*\n\n"
+        "🥇 *XAUUSD Trading Bot*\n\n"
         "*Bare skriv til mig — AI forstår naturligt sprog.*\n\n"
-        "*📊 Trading*\n"
+        "*📊 Trading (Gold only — 1 trade/dag)*\n"
+        "/market — dagsoverblik: Asian range, nyheder, slot-status\n"
         "/trades — åbne trades + statistik\n"
-        "/trade SYM long ENTRY sl=X tp=Y — log trade manuelt\n"
+        "/trade XAUUSD long ENTRY sl=X tp=Y — log trade manuelt\n"
         "/close <id> [pris] — luk trade\n"
         "/why <id> — grundlag for trade\n"
-        "/market — seneste signaler\n"
-        "/watchlist — vis/ændr overvågningsliste\n"
-        "/scan — scan markedet NU\n\n"
+        "/scan — scan markedet NU\n"
+        "/lektioner — fuld retrospektiv analyse\n"
+        "/lessons — win rate per setup-type\n\n"
         "*Opgaver & Mål*\n"
         "/task <desc> — kø en-gangs opgave\n"
         "/goal <desc> — opret vedvarende mål\n"
@@ -445,23 +446,44 @@ async def cmd_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     try:
-        raw_signals = await redis_client.lrange("trading:signal_history", 0, 9)
+        from core.trading import news_filter, asian_range as ar
+        from core.trading.market_monitor import DEFAULT_FOREX
+        from datetime import datetime, timezone
+
+        lines = ["🥇 *XAUUSD — Dagsoverblik*\n"]
+
+        # ── News filter status ────────────────────────────────────────────────
+        try:
+            news_blocked, news_reason = await news_filter.is_blocked_by_news()
+            if news_blocked:
+                lines.append(f"📰 {news_reason}\n")
+            else:
+                upcoming = await news_filter.next_event_description()
+                lines.append(f"📰 *Kommende nyheder:*\n{upcoming}\n")
+        except Exception:
+            pass
+
+        # ── Daily trade status ────────────────────────────────────────────────
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        count = await redis_client.get(f"trading:daily_signals:{today}")
+        trades_today = int(count or 0)
+        cap_tag = "✅ Slot ledig" if trades_today == 0 else "🔒 Dagens trade er taget"
+        lines.append(f"📊 Dagens handel: *{trades_today}/1* — {cap_tag}\n")
+
+        # ── Seneste signaler ──────────────────────────────────────────────────
+        raw_signals = await redis_client.lrange("trading:signal_history", 0, 4)
         signals = [json.loads(r) for r in raw_signals] if raw_signals else []
-        if not signals:
-            await update.message.reply_text("Ingen signaler endnu. Monitoren scanner hvert 10. minut.")
-            return
-        lines = []
-        for s in signals[:8]:
-            d = "📈" if s.get("direction") == "long" else "📉"
-            conf = f"{s.get('confidence', 0):.0%}"
-            sym = s.get("symbol", "?")
-            price = s.get("price", 0)
-            ts = s.get("ts", "")[:16].replace("T", " ")
-            lines.append(f"{d} *{sym}* {conf} @ {price:.4g} _{ts}_")
-        await update.message.reply_text(
-            "*Seneste handelssignaler:*\n\n" + "\n".join(lines),
-            parse_mode="Markdown"
-        )
+        if signals:
+            lines.append("*Seneste signaler:*")
+            for s in signals[:4]:
+                d = "📈" if s.get("direction") == "long" else "📉"
+                conf = f"{s.get('confidence', 0):.0%}"
+                price = s.get("price", 0)
+                ts = s.get("ts", "")[:16].replace("T", " ")
+                setup = s.get("setup_type", "?")
+                lines.append(f"  {d} {conf} @ {price:,.2f} _{ts}_ — {setup}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
