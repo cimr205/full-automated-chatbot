@@ -25,6 +25,7 @@ from core.memory.brain import Brain
 from core.memory.vault import SecureVault
 from core.trading.market_monitor import MarketMonitor
 from core.trading import learning as trading_learning
+from core.trading import retrospective as trading_retrospective
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/goals — vis aktive mål\n"
         "/status <id> — opgavestatus\n"
         "/stop <id> — stop kørende opgave\n"
-        "/pause <id> / /resume <id> / /cancel <id>\n\n"
+        "/pause <id> / /resume <id> / /cancel_goal <id>\n\n"
         "*Vault (krypteret)*\n"
         "/vault save <navn> <værdi> — gem credentials\n"
         "/vault get <navn> — hent (slettes om 30s)\n"
@@ -291,11 +292,11 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
-async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_cancel_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     if not ctx.args:
-        await update.message.reply_text("Usage: /cancel <goal_id>")
+        await update.message.reply_text("Usage: /cancel_goal <goal_id>")
         return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -702,6 +703,18 @@ async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_lektioner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Full retrospective — analyse ALL past trades and send a breakdown."""
+    if not await auth(update):
+        return
+    await update.message.reply_text("🔍 Analyserer alle lukkede handler…")
+    try:
+        summary = await trading_retrospective.full_retrospective(redis_client)
+        await update.message.reply_text(summary, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show all open trades."""
     if not await auth(update):
@@ -1017,7 +1030,8 @@ async def listen_notifications(bot):
                 task_id = data.get("task_id", "?")
                 parse_mode = data.get("parse_mode", "Markdown")
                 # Trading signals come with pre-formatted Markdown — send directly
-                if task_id.startswith("signal_"):
+                direct_task_ids = ("signal_", "retrospective", "trade_close")
+                if any(task_id.startswith(p) for p in direct_task_ids):
                     await bot.send_message(
                         chat_id=ALLOWED_CHAT_ID,
                         text=msg_text,
@@ -1091,13 +1105,14 @@ async def main():
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan), ("chart", cmd_chart),
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
-        ("lessons", cmd_lessons), ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
+        ("lessons", cmd_lessons), ("lektioner", cmd_lektioner),
+        ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
         ("optimize", cmd_optimize),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),
         ("goals", cmd_goals), ("pause", cmd_pause), ("resume", cmd_resume),
-        ("cancel", cmd_cancel), ("health", cmd_health),
+        ("cancel_goal", cmd_cancel_goal), ("health", cmd_health),
         ("vault", cmd_vault),
         ("remember", cmd_remember), ("recall", cmd_recall),
         ("brain", cmd_brain), ("forget", cmd_forget),

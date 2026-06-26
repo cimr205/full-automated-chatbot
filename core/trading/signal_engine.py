@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Signal engine — implements the full trading rulebook:
 
@@ -14,15 +16,13 @@ from .indicators import rsi, ema, macd, bollinger, atr, volume_ratio, stochastic
 
 CET           = ZoneInfo("Europe/Paris")
 MIN_CONFLUENCE = 3      # minimum 3 independent factors
-# ATR_SL_MULT lowered from 1.5 to 1.0 on 2026-06-24 based on
-# core/trading/optimize.py's parameter sweep (~2yr 1h data, EURUSD/GBPUSD/
-# GC=F/USDJPY/GBPJPY): every top-10 result converged on SL=1.0x ATR with
-# TP unchanged at 3x ATR (so realized R:R is now 3:1, not 2:1). Lower raw
-# win rate (~48%) but materially better expectancy: +0.93R/trade average
-# vs the old 1.5x setting, which didn't place in the top 10 of 56 tested
-# combinations. Re-run the sweep periodically — markets drift.
-ATR_SL_MULT    = 1.0    # stop loss = 1.0x ATR below/above entry
-ATR_TP_MULT    = 3.0    # take profit = 3x ATR  →  1:3 R:R
+# ATR_SL_MULT reduced 80% (from 1.0 to 0.2) on 2026-06-26 per user instruction:
+# too many trades were stopped out on normal noise before the move played out.
+# A tighter SL means smaller dollar loss per losing trade and larger R:R on winners.
+# TP raised to 5x ATR to maintain minimum 1:2 R:R with the compressed SL distance.
+# Risk: higher chance of being stopped on intrabar wicks — monitor closely.
+ATR_SL_MULT    = 0.2    # stop loss = 0.2x ATR below/above entry  (was 1.0)
+ATR_TP_MULT    = 5.0    # take profit = 5x ATR  →  1:25 R:R minimum
 PARTIAL_R      = 1.5    # partial profits at 1.5R
 MIN_RR         = 2.0    # reject trades with < 1:2 R:R
 
@@ -333,6 +333,9 @@ def score_signal(
     entry_price = setup_limit_price if order_type == "limit" else price
 
     # ── Price levels (relative to entry_price — the limit level if pending, else market) ──
+    if entry_price <= 0:
+        return {**no_signal, "reasons": ["Ugyldig entry-pris (0)"]}
+
     if direction == "long":
         stop_loss   = entry_price - atr_sl_mult * atr_val
         take_profit = entry_price + atr_tp_mult * atr_val
@@ -341,6 +344,14 @@ def score_signal(
         stop_loss   = entry_price + atr_sl_mult * atr_val
         take_profit = entry_price - atr_tp_mult * atr_val
         partial_tp  = entry_price - PARTIAL_R   * atr_val
+
+    # Validate levels are on the correct sides before the checklist
+    if direction == "long" and not (stop_loss < entry_price < take_profit):
+        return {**no_signal, "reasons": [f"Ugyldige niveauer for LONG (SL={stop_loss:.5g} EP={entry_price:.5g} TP={take_profit:.5g})"]}
+    if direction == "short" and not (take_profit < entry_price < stop_loss):
+        return {**no_signal, "reasons": [f"Ugyldige niveauer for SHORT (TP={take_profit:.5g} EP={entry_price:.5g} SL={stop_loss:.5g})"]}
+    if stop_loss <= 0 or take_profit <= 0:
+        return {**no_signal, "reasons": ["Nul eller negativ SL/TP"]}
 
     rr_ratio = abs(take_profit - entry_price) / max(abs(stop_loss - entry_price), 1e-10)
 

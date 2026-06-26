@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Position Manager — tracks all open and closed trades in Redis.
 
@@ -11,9 +13,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 import redis.asyncio as aioredis
 
-from . import learning
+from . import learning, retrospective
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ class PositionManager:
     def __init__(self, redis: aioredis.Redis):
         self._redis   = redis
         self._running = False
+        self._mt5     = None   # injected by MarketMonitor after both are created
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -113,6 +117,11 @@ class PositionManager:
             await learning.record_outcome(self._redis, trade)
         except Exception as e:
             log.warning("Learning record failed: %s", e)
+
+        try:
+            await retrospective.analyse_trade(self._redis, trade)
+        except Exception as e:
+            log.warning("Retrospective analyse failed: %s", e)
 
         return trade
 
@@ -214,7 +223,6 @@ class PositionManager:
                 log.warning("[%s] position check: %s", symbol, e)
 
     async def _get_current_price(self, symbol: str) -> float | None:
-        import httpx
         url = (
             f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
             f"?interval=1m&range=5m&includePrePost=false"
@@ -227,11 +235,19 @@ class PositionManager:
                 data = resp.json()
             result  = data.get("chart", {}).get("result", [])
             if not result:
+                log.debug("[%s] No price data in Yahoo response", symbol)
                 return None
             closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
             closes = [c for c in closes if c is not None]
-            return closes[-1] if closes else None
-        except Exception:
+            price = closes[-1] if closes else None
+            if price is None:
+                log.debug("[%s] All close prices were None in Yahoo response", symbol)
+            return price
+        except httpx.HTTPStatusError as e:
+            log.warning("[%s] Yahoo price fetch HTTP %s", symbol, e.response.status_code)
+            return None
+        except Exception as e:
+            log.warning("[%s] Yahoo price fetch failed: %s", symbol, e)
             return None
 
     async def _evaluate_position(self, trade: dict, price: float):
@@ -269,11 +285,30 @@ class PositionManager:
             await self._notify_close(closed, "🎯 Take Profit ramt")
             return
 
-        # Partial profit level hit — notify (user moves SL to BE manually)
+        # Partial profit level hit — take note and auto-move SL to breakeven on MT5
         if partial_hit:
             trade["partial_taken"] = True
+            trade["stop_loss"] = entry   # update local record to BE
             await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
             await self._notify_partial(trade, price)
+
+            # Auto-move SL to breakeven on MT5 if bridge is available
+            if self._mt5:
+                try:
+                    mod_result = await self._mt5.modify_trade(
+                        trade_id=trade_id,
+                        symbol=trade["symbol"],
+                        new_sl=entry,
+                        new_tp=trade["take_profit"],
+                    )
+                    if "error" in mod_result:
+                        log.warning("[%s] Auto-BE move failed on MT5: %s",
+                                    trade["symbol"], mod_result["error"])
+                    else:
+                        log.info("[%s] SL moved to breakeven @ %s on MT5",
+                                 trade["symbol"], entry)
+                except Exception as e:
+                    log.warning("[%s] Auto-BE move exception: %s", trade["symbol"], e)
 
     async def _notify_close(self, trade: dict, reason: str):
         if not trade:

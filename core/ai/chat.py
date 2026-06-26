@@ -53,11 +53,13 @@ def _get_endpoint() -> tuple[str, str, str]:
 
     # Groq (free) or xAI
     key = os.getenv("GROQ_API_KEY", "")
-    if not key:
-        return "", "", ""
-    if key.startswith("xai-"):
-        return key, "https://api.x.ai/v1/chat/completions", os.getenv("GROQ_MODEL", "grok-3-mini")
-    return key, "https://api.groq.com/openai/v1/chat/completions", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    if key:
+        if key.startswith("xai-"):
+            return key, "https://api.x.ai/v1/chat/completions", os.getenv("GROQ_MODEL", "grok-3-mini")
+        return key, "https://api.groq.com/openai/v1/chat/completions", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    # Pollinations.ai — completely free, no key needed, always available
+    return "pollinations", "https://text.pollinations.ai/openai", "openai"
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -243,6 +245,7 @@ async def chat(
 
     content = ""
     is_anthropic = url == "anthropic"
+    is_pollinations = key == "pollinations"
     ai_timeout = 180 if key == "ollama" else 60
     for round_num in range(8):
         try:
@@ -269,7 +272,7 @@ async def chat(
                     content = data["content"][0]["text"].strip()
                 else:
                     headers = {"Content-Type": "application/json"}
-                    if key != "ollama":
+                    if key not in ("ollama", "pollinations"):
                         headers["Authorization"] = f"Bearer {key}"
                     resp = await client.post(
                         url,
@@ -279,7 +282,6 @@ async def chat(
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                    # Ollama (and some APIs) return {"error": "..."} on model errors
                     if "error" in data:
                         raise Exception(data["error"])
                     content = data["choices"][0]["message"]["content"].strip()
