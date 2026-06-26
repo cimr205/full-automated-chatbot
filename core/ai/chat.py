@@ -16,6 +16,27 @@ _AI_URL: Optional[str] = None
 _AI_MODEL: Optional[str] = None
 
 
+_OLLAMA_URL_REMOTE = (
+    "https://raw.githubusercontent.com/cimr205/full-automated-chatbot/main/.ollama_url"
+)
+_cached_ollama_url: str = ""
+
+
+def _fetch_ollama_url_sync() -> str:
+    """Read the current tunnel URL published to the public GitHub repo."""
+    global _cached_ollama_url
+    try:
+        import urllib.request
+        with urllib.request.urlopen(_OLLAMA_URL_REMOTE, timeout=3) as r:
+            url = r.read().decode().strip()
+            if url.startswith("http"):
+                _cached_ollama_url = url
+                return url
+    except Exception:
+        pass
+    return _cached_ollama_url
+
+
 def _get_endpoint() -> tuple[str, str, str]:
     # Anthropic Claude — easiest to set up, just set ANTHROPIC_API_KEY in Railway
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -23,10 +44,13 @@ def _get_endpoint() -> tuple[str, str, str]:
         model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
         return anthropic_key, "anthropic", model
 
-    # Ollama (self-hosted)
+    # Ollama (self-hosted) — explicit env var takes priority
     ollama_url = os.getenv("OLLAMA_URL", "").rstrip("/")
+    if not ollama_url:
+        # Auto-discover: read tunnel URL published from Mac to public repo
+        ollama_url = _fetch_ollama_url_sync().rstrip("/")
     if ollama_url:
-        model = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+        model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
         return "ollama", f"{ollama_url}/v1/chat/completions", model
 
     # Groq (free) or xAI
