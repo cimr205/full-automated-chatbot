@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from .indicators import rsi, ema, macd, bollinger, atr, volume_ratio, stochastic
 from . import asian_range as _asian_range
+from . import confluences as _confluences
 
 CET           = ZoneInfo("Europe/Paris")
 MIN_CONFLUENCE = 3      # minimum 3 independent factors
@@ -329,6 +330,18 @@ def score_signal(
     setup_limit_price = None
     LIMIT_ORDER_KINDS = {"bullish_fvg", "bearish_fvg", "bullish_break_retest", "bearish_break_retest"}
 
+    # ── Gold confluence checks (7 factors) ───────────────────────────────────
+    # Run BEFORE setup detection so confirmed confluences can boost confidence
+    # and appear in the Telegram signal message as specific reasons.
+    confluence_boost  = 0.0
+    confluence_labels = []
+    if ohlcv_15m:
+        confluence_boost, confluence_labels = _confluences.check_all(
+            direction, ohlcv_15m, ohlcv_1h, ohlcv_4h if ohlcv_4h else [], asian_sweep
+        )
+        all_reasons.extend(confluence_labels)
+        confidence = min(0.97, confidence + confluence_boost)
+
     # Inject Asian sweep as the primary setup (before 1H detectors)
     if asian_sweep and asian_sweep["direction"] == direction:
         setups.append(asian_sweep["label"])
@@ -424,9 +437,11 @@ def score_signal(
         "vol_ratio":    base.get("vol_ratio", 1.0),
         "pct_b":        base.get("pct_b", 0.5),
         "atr":          atr_val,
-        "timeframes":   len(frames),
-        "session":      sess,
-        "confluence":   confluence,
-        "checklist":    checklist,
-        "checklist_ok": checklist_ok,
+        "timeframes":         len(frames),
+        "session":            sess,
+        "confluence":         confluence,
+        "confluence_boost":   confluence_boost,
+        "confluence_labels":  confluence_labels,
+        "checklist":          checklist,
+        "checklist_ok":       checklist_ok,
     }

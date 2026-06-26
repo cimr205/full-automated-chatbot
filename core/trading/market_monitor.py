@@ -436,13 +436,15 @@ class MarketMonitor:
         confluence = signal.get("confluence",  0)
         checklist  = signal.get("checklist",   {})
         timeframes = signal.get("timeframes",  1)
-        rsi_val    = signal.get("rsi",  50)
-        vol_r      = signal.get("vol_ratio", 1.0)
+        rsi_val           = signal.get("rsi",  50)
+        vol_r             = signal.get("vol_ratio", 1.0)
+        confluence_boost  = signal.get("confluence_boost", 0.0)
+        confluence_labels = signal.get("confluence_labels", [])
 
         dir_emoji  = "📈 LONG / KØB" if direction == "long" else "📉 SHORT / SÆLG"
-        market_tag = "💱 Forex" if market == "forex" else "📊 Aktier/Indeks"
         sess_name  = session.get("name", "Ukendt")
         prime_tag  = " ⭐ PRIME" if session.get("prime") else ""
+        mt5_sym    = signal.get("mt5_symbol", symbol)
 
         def fmt(v):
             if v == 0: return "0"
@@ -463,19 +465,24 @@ class MarketMonitor:
             for k, label in cl_labels.items()
         ]
 
+        # Gold confluence breakdown — shows exactly WHY we're taking this trade
+        gold_conf_lines = "\n".join(f"  {lbl}" for lbl in confluence_labels) if confluence_labels else "  • Basis-indikatorer"
+        conf_boost_str  = f" _(+{confluence_boost:.0%} boost fra {len(confluence_labels)}/7 faktorer)_" if confluence_boost > 0 else ""
+
         tf_label = {1: "1 tf", 2: "2 tf", 3: "3 tf"}.get(timeframes, f"{timeframes} tf")
         message = (
-            f"🚨 *HANDELSSIGNAL* — {market_tag}\n"
+            f"🚨 *GULD SIGNAL* — XAUUSD\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"*{symbol}*  {dir_emoji}\n"
-            f"Confidence: *{confidence:.0%}*  |  {tf_label}  |  {confluence} faktorer\n\n"
+            f"*{mt5_sym}*  {dir_emoji}\n"
+            f"Confidence: *{confidence:.0%}*{conf_boost_str}\n"
+            f"{tf_label}  |  {confluence} faktorer\n\n"
             f"💰 Entry:          `{fmt(price)}`\n"
-            f"🛑 Stop Loss:    `{fmt(sl)}`  _(1.5x ATR)_\n"
+            f"🛑 Stop Loss:    `{fmt(sl)}`\n"
             f"🎯 Target:         `{fmt(tp)}`  _(R:R = {rr:.1f}:1)_\n"
-            f"💛 Delvis profit:  `{fmt(partial_tp)}`  _(ved 1.5R → flyt SL til BE)_\n\n"
+            f"💛 Delvis profit:  `{fmt(partial_tp)}`  _(→ flyt SL til BE)_\n\n"
+            f"*🔍 Bekræftede faktorer ({len(confluence_labels)}/7):*\n{gold_conf_lines}\n\n"
             f"*Pre-trade checklist:*\n" + "\n".join(cl_lines) +
-            (f"\n\n*Setups:*\n" + "\n".join(f"  🔷 {s}" for s in setups) if setups else "") +
-            f"\n\n*Confluence:*\n" + "\n".join(f"  • {r}" for r in reasons[:5]) +
+            (f"\n\n*Setup:*\n" + "\n".join(f"  🔷 {s}" for s in setups) if setups else "") +
             f"\n\n_RSI: {rsi_val:.1f}  |  Vol: {vol_r:.1f}x  |  {sess_name}_"
         )
 
