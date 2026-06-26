@@ -374,6 +374,12 @@ def score_signal(
         "8_setup_identified": bool(setup_type),
     }
 
+    # Pullback setups have 0% win rate in backtest across all symbols — block at signal level.
+    # This is a second line of defence after learning.is_blocked(); if learning Redis is
+    # unavailable for any reason this guard still prevents the worst setups from executing.
+    if setup_type in ("bullish_pullback", "bearish_pullback"):
+        return {**no_signal, "reasons": [f"{setup_type} er blokeret (0% WR i backtest)"]}
+
     # Hard blockers: trend, confluence, R:R, session must all pass
     hard_checks = ["1_trend_aligned", "2_confluence_3plus", "4_rr_min_1_2", "7_active_session"]
     checklist_ok = all(checklist[k] for k in hard_checks)
