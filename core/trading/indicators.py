@@ -14,6 +14,8 @@ def rsi(closes: list[float], period: int = 14) -> float:
     losses = np.where(deltas < 0, -deltas, 0.0)
     avg_gain = np.mean(gains[-period:])
     avg_loss = np.mean(losses[-period:])
+    if avg_gain == 0 and avg_loss == 0:
+        return 50.0  # no movement at all — neutral, not overbought
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss

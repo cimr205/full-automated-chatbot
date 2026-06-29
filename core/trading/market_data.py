@@ -2,6 +2,7 @@
 Free market data via Yahoo Finance's public REST endpoint — no API key needed.
 Used for both forex pairs (EURUSD=X style) and stocks/indices (SPY, ^GSPC, etc).
 """
+import asyncio
 import logging
 
 import httpx
@@ -10,37 +11,63 @@ log = logging.getLogger(__name__)
 
 YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 
+# Some symbols are unreliable on Yahoo's unofficial chart endpoint (rate
+# limits / temporary delisting). Try these alternates, in order, before
+# giving up — e.g. gold spot (XAUUSD=X) falls back to the COMEX future (GC=F).
+FALLBACK_SYMBOLS = {
+    "XAUUSD=X": ["GC=F"],
+}
 
-async def fetch_ohlcv(symbol: str, interval: str = "1h", range_: str = "5d") -> dict | None:
-    """Returns {open, high, low, close, volume} lists, oldest → newest, or None on failure."""
+RETRIES = 3
+RETRY_BACKOFF = 1.5  # seconds, multiplied by attempt number
+
+
+async def _fetch_once(symbol: str, interval: str, range_: str) -> dict | None:
     url = f"{YF_BASE}/{symbol}"
     params = {"interval": interval, "range": range_}
     headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, params=params, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        result = data["chart"]["result"][0]
-        quote = result["indicators"]["quote"][0]
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, params=params, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    result = data["chart"]["result"][0]
+    quote = result["indicators"]["quote"][0]
 
-        opens, highs, lows, closes, volumes = (
-            quote.get("open", []), quote.get("high", []), quote.get("low", []),
-            quote.get("close", []), quote.get("volume", []),
-        )
-        # Drop trailing/leading None candles (Yahoo sometimes pads incomplete bars)
-        cleaned = [
-            (o, h, l, c, v or 0)
-            for o, h, l, c, v in zip(opens, highs, lows, closes, volumes)
-            if None not in (o, h, l, c)
-        ]
-        if len(cleaned) < 10:
-            return None
-        o, h, l, c, v = map(list, zip(*cleaned))
-        return {"open": o, "high": h, "low": l, "close": c, "volume": v}
-    except Exception as e:
-        log.warning("Market data fetch failed for %s: %s", symbol, e)
+    opens, highs, lows, closes, volumes = (
+        quote.get("open", []), quote.get("high", []), quote.get("low", []),
+        quote.get("close", []), quote.get("volume", []),
+    )
+    # Drop trailing/leading None candles (Yahoo sometimes pads incomplete bars)
+    cleaned = [
+        (o, h, l, c, v or 0)
+        for o, h, l, c, v in zip(opens, highs, lows, closes, volumes)
+        if None not in (o, h, l, c)
+    ]
+    if len(cleaned) < 10:
         return None
+    o, h, l, c, v = map(list, zip(*cleaned))
+    return {"open": o, "high": h, "low": l, "close": c, "volume": v}
+
+
+async def fetch_ohlcv(symbol: str, interval: str = "1h", range_: str = "5d") -> dict | None:
+    """Returns {open, high, low, close, volume} lists, oldest → newest, or None on failure.
+
+    Retries transient failures and falls back to alternate tickers (see
+    FALLBACK_SYMBOLS) so a single flaky symbol mapping doesn't permanently
+    starve the bot of data for a watchlist entry.
+    """
+    for candidate in [symbol] + FALLBACK_SYMBOLS.get(symbol, []):
+        for attempt in range(1, RETRIES + 1):
+            try:
+                result = await _fetch_once(candidate, interval, range_)
+                if result:
+                    return result
+            except Exception as e:
+                log.warning("Market data fetch failed for %s (attempt %d/%d): %s",
+                            candidate, attempt, RETRIES, e)
+            if attempt < RETRIES:
+                await asyncio.sleep(RETRY_BACKOFF * attempt)
+    return None
 
 
 def resample_4h(ohlcv_1h: dict) -> dict | None:

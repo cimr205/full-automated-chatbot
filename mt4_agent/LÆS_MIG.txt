@@ -25,11 +25,19 @@ Derefter — i selve MetaTrader 4:
 4. Gå tilbage til MetaTrader 4
 5. Tryk Ctrl+N (åbner Navigator)
 6. Under Expert Advisors: find MT4_Bridge
-7. Træk den ind på et åbent chart (vælg fx EURUSD)
+7. Træk den ind på et åbent chart — denne bot handler kun XAUUSD
+   (guld), så åbn et chart for XAUUSD (eller det navn din broker
+   bruger for guld — se punkt 10 nedenfor)
 8. I popup-vinduet: gå til "Common"-fanen og sæt hak ved
    "Allow live trading" → tryk OK
 9. Du skal se et lille smiley-ansigt i øverste højre hjørne
    af chartet — det betyder den kører ✓
+10. VIGTIGT: Sørg for at guld-symbolet er synligt i "Market Watch"
+    (vinduet til venstre i MT4, Ctrl+M hvis det er skjult).
+    Hvis du ikke kan se det, højreklik → "Symbols" → find Gold/XAUUSD
+    → "Show". Hedder symbolet noget andet end "XAUUSD" hos din broker
+    (fx "XAUUSDm" eller "GOLD") — åbn .env-filen i denne mappe og sæt
+    GOLD_SYMBOL=det rigtige navn, gem, og genstart START.bat.
 
 Sådan finder du din Railway Redis URL:
 ────────────────────────────────────────

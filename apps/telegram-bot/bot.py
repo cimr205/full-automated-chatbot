@@ -115,6 +115,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/why <id> — se begrundelse for en trade\n"
         "/watchlist — overvågede symboler\n"
         "/scan — scan markedet nu\n"
+        "/journal — sidste 10 scans + hvorfor de blev afvist\n"
         "/broker [mt4|mt5|auto] — broker-forbindelse\n\n"
         "*System*\n"
         "/health — systemstatus\n"
@@ -614,6 +615,27 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_journal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await auth(update):
+        return
+    try:
+        entries = await api_get("/trading/journal?limit=10")
+        if not entries:
+            await update.message.reply_text("Ingen scans logget endnu.")
+            return
+        lines = []
+        for e in entries:
+            dot = "✅" if e.get("published") else "❌"
+            reason = e.get("reject_reason") or "—"
+            conf = f"{(e.get('confidence') or 0)*100:.0f}%"
+            lines.append(f"{dot} `{e['symbol']}` conf:`{conf}` — {reason}")
+        await update.message.reply_text(
+            "*Sidste 10 scans:*\n" + "\n".join(lines), parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_broker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
@@ -801,7 +823,7 @@ async def main():
         ("lead", cmd_lead), ("findleads", cmd_findleads),
         ("trades", cmd_trades), ("trade", cmd_trade), ("close", cmd_close),
         ("why", cmd_why), ("market", cmd_market), ("watchlist", cmd_watchlist),
-        ("scan", cmd_scan), ("broker", cmd_broker),
+        ("scan", cmd_scan), ("broker", cmd_broker), ("journal", cmd_journal),
     ]
     for name, handler in handlers:
         app.add_handler(CommandHandler(name, handler))

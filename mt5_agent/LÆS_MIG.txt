@@ -35,6 +35,12 @@ Vigtigt:
 ──────────
 • MetaTrader 5 skal være åbent og logget ind
 • Du skal have en aktiv konto hos din broker i MT5
+• Denne bot handler kun XAUUSD (guld). Sørg for at symbolet er
+  synligt i "Market Watch" (Ctrl+M) — hvis ikke, højreklik →
+  "Symbols" → find Gold/XAUUSD → "Show".
+• Hedder symbolet noget andet hos din broker (fx "XAUUSDm" eller
+  "GOLD") — åbn .env-filen i denne mappe og sæt
+  GOLD_SYMBOL=det rigtige navn, gem, og genstart START.bat.
 • Bruger du MetaTrader 4 i stedet? Se mt4_agent-mappen.
 
 Filer i denne mappe:

@@ -57,6 +57,8 @@ SYMBOL_MAP = {
     "EURGBP=X": "EURGBP",
     "EURJPY=X": "EURJPY",
     "NZDUSD=X": "NZDUSD",
+    "XAUUSD=X": "XAUUSD",
+    "GC=F":     "XAUUSD",
     "SPY":   "US500",
     "QQQ":   "US100",
     "^GSPC": "US500",
@@ -68,7 +70,10 @@ SYMBOL_MAP = {
 }
 
 def to_mt5_symbol(yf_symbol: str) -> str:
-    return SYMBOL_MAP.get(yf_symbol, yf_symbol.replace("=X", "").replace("^", ""))
+    mapped = SYMBOL_MAP.get(yf_symbol, yf_symbol.replace("=X", "").replace("^", ""))
+    if mapped == "XAUUSD":
+        return os.getenv("GOLD_SYMBOL", "XAUUSD")
+    return mapped
 
 
 # ── MT5 execution ─────────────────────────────────────────────────────────────

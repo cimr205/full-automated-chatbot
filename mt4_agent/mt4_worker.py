@@ -64,6 +64,8 @@ SYMBOL_MAP = {
     "EURGBP=X": "EURGBP",
     "EURJPY=X": "EURJPY",
     "NZDUSD=X": "NZDUSD",
+    "XAUUSD=X": "XAUUSD",
+    "GC=F":     "XAUUSD",
     "SPY":   "US500",
     "QQQ":   "US100",
     "^GSPC": "US500",
@@ -75,7 +77,10 @@ SYMBOL_MAP = {
 }
 
 def to_mt4_symbol(yf_symbol: str) -> str:
-    return SYMBOL_MAP.get(yf_symbol, yf_symbol.replace("=X", "").replace("^", ""))
+    mapped = SYMBOL_MAP.get(yf_symbol, yf_symbol.replace("=X", "").replace("^", ""))
+    if mapped == "XAUUSD":
+        return os.getenv("GOLD_SYMBOL", "XAUUSD")
+    return mapped
 
 
 def ea_alive(max_age: float = 5.0) -> bool:
@@ -88,10 +93,14 @@ def ea_alive(max_age: float = 5.0) -> bool:
 
 
 def write_cmd_file(trade_id: str, fields: dict):
+    # Write to a temp file then rename atomically — the EA polls this folder
+    # every CheckIntervalMs and must never see a partially-written command.
     path = COMMANDS_DIR / f"{trade_id}.cmd"
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = COMMANDS_DIR / f"{trade_id}.cmd.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         for k, v in fields.items():
             f.write(f"{k}={v}\n")
+    tmp_path.replace(path)
 
 
 def read_result_file(path: Path) -> dict:

@@ -21,14 +21,14 @@ from .broker_bridge import BrokerBridge
 
 log = logging.getLogger(__name__)
 
-DEFAULT_FOREX  = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "GBPJPY=X",
-                  "AUDUSD=X", "USDCHF=X", "USDCAD=X", "EURGBP=X"]
-DEFAULT_STOCKS = ["SPY", "QQQ", "NVDA", "AAPL", "MSFT", "^GSPC", "^NDX", "^DJI"]
+DEFAULT_FOREX  = ["XAUUSD=X"]
+DEFAULT_STOCKS = []
 
 MONITOR_INTERVAL  = 600     # 10 minutes between full scans
 CONFIDENCE_THRESH = 0.68    # only publish/execute above this
 SIGNAL_COOLDOWN   = 14400   # 4 hours — don't re-signal the same symbol+direction
 MAX_DAILY_SIGNALS = 5
+DATA_FAILURE_ALERT_AFTER = 3  # consecutive failed scans before we tell the user
 
 
 class MarketMonitor:
@@ -36,6 +36,7 @@ class MarketMonitor:
         self._redis    = redis
         self._running  = False
         self._last_signal: dict[str, dict] = {}
+        self._data_fail_count: dict[str, int] = {}
         self.positions = PositionManager(redis)
         self.broker    = BrokerBridge(redis)
 
@@ -77,7 +78,9 @@ class MarketMonitor:
         ohlcv_1h = await fetch_ohlcv(symbol, interval="1h", range_="1mo")
         if not ohlcv_1h:
             await self._journal(symbol, market, None, published=False, reject_reason="ingen data")
+            await self._track_data_failure(symbol)
             return
+        self._data_fail_count[symbol] = 0
 
         ohlcv_4h = resample_4h(ohlcv_1h)
         ohlcv_1d = await fetch_ohlcv(symbol, interval="1d", range_="6mo")
@@ -133,6 +136,23 @@ class MarketMonitor:
         await self._notify_trade_open(trade_id, symbol, signal)
         await self._journal(symbol, market, signal, published=True)
         await self._increment_daily_count()
+
+    async def _track_data_failure(self, symbol: str):
+        """Alert the user if a symbol can't be fetched repeatedly, instead of
+        silently never trading it (e.g. data source blocking/rate-limiting)."""
+        count = self._data_fail_count.get(symbol, 0) + 1
+        self._data_fail_count[symbol] = count
+        if count == DATA_FAILURE_ALERT_AFTER:
+            await self._redis.publish("supervisor:notifications", json.dumps({
+                "message": (
+                    f"⚠️ *Datafejl: {symbol}*\n"
+                    f"Kunne ikke hente kursdata {count} scans i træk. "
+                    f"Boten kan ikke analysere eller handle {symbol} før dette løses.\n"
+                    f"Tjek evt. om datakilden blokerer serverens IP."
+                ),
+                "parse_mode": "Markdown",
+                "task_id": "trading",
+            }))
 
     @staticmethod
     def _reject_reason(signal: dict) -> str:
