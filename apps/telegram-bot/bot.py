@@ -643,10 +643,10 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Measure the real historical win rate for a symbol: /backtest EURUSD=X"""
+    """Measure the real historical win rate for a symbol: /backtest GC=F (XAUUSD)"""
     if not await auth(update):
         return
-    symbol = ctx.args[0] if ctx.args else "EURUSD=X"
+    symbol = ctx.args[0] if ctx.args else "GC=F"
     await update.message.reply_text(f"⏳ Backtester {symbol} mod ~2 års historik — kan tage et minut...")
     try:
         from core.trading.backtest import run_backtest

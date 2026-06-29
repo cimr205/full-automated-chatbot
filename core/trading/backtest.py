@@ -8,7 +8,7 @@ its SL or TP is hit. Also used to pre-seed core/trading/learning.py with
 real historical outcomes, so a fresh account doesn't have to lose 5 live
 trades on a bad setup before the bot learns to stop using it.
 
-Run standalone:  python -m core.trading.backtest EURUSD=X
+Run standalone:  python -m core.trading.backtest GC=F   (XAUUSD)
 """
 import asyncio
 import json
@@ -163,7 +163,7 @@ async def seed_learning(redis, symbols: list[str]) -> dict:
 
 
 def _cli():
-    symbol = sys.argv[1] if len(sys.argv) > 1 else "EURUSD=X"
+    symbol = sys.argv[1] if len(sys.argv) > 1 else "GC=F"
     result = asyncio.run(run_backtest(symbol))
     print(json.dumps(result, indent=2))
 

@@ -21,7 +21,7 @@ import time
 from . import signal_engine as se
 from .backtest import fetch_history, simulate
 
-DEFAULT_SYMBOLS = ["EURUSD=X", "GBPUSD=X", "GC=F", "USDJPY=X", "GBPJPY=X"]
+DEFAULT_SYMBOLS = ["GC=F"]  # XAUUSD only — matches market_monitor.DEFAULT_FOREX
 
 # Kept deliberately small — an earlier 3x3x3x3x6 grid (2430 simulate() calls)
 # ran for over 2 hours without finishing; looser thresholds trigger far more

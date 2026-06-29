@@ -573,7 +573,7 @@ async def get_lessons():
 
 
 @app.get("/trading/backtest")
-async def backtest_symbol(symbol: str = "EURUSD=X"):
+async def backtest_symbol(symbol: str = "GC=F"):
     return await trading_backtest.run_backtest(symbol)
 
 
