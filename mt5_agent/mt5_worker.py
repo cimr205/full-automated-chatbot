@@ -125,6 +125,21 @@ def _initialize() -> bool:
 
 # ── MT5 execution ─────────────────────────────────────────────────────────────
 
+def _pick_filling_mode(info) -> int:
+    """
+    Brokers vary in which order-filling mode they accept per symbol — hardcoding
+    IOC causes silent 'Unsupported filling mode' rejections on brokers that only
+    support FOK (or only RETURN, for exchange-traded instruments). Pick the first
+    mode this symbol's filling_mode bitmask actually advertises support for.
+    """
+    mode = getattr(info, "filling_mode", 0)
+    if mode & mt5.SYMBOL_FILLING_IOC:
+        return mt5.ORDER_FILLING_IOC
+    if mode & mt5.SYMBOL_FILLING_FOK:
+        return mt5.ORDER_FILLING_FOK
+    return mt5.ORDER_FILLING_RETURN
+
+
 def mt5_open_trade(symbol: str, direction: str, volume: float,
                    sl: float, tp: float, comment: str = "",
                    order_type: str = "market", limit_price: float = 0) -> dict:
@@ -167,7 +182,7 @@ def mt5_open_trade(symbol: str, direction: str, volume: float,
         "magic":        MT5_MAGIC,
         "comment":      comment[:31],
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(info),
     }
 
     result = mt5.order_send(request)
@@ -291,6 +306,8 @@ def mt5_close_trade(ticket: int, symbol: str, direction: str, volume: float) -> 
         mt5.shutdown()
         return {"error": f"Ingen tick data for {symbol}"}
 
+    info = mt5.symbol_info(symbol)
+
     close_type  = mt5.ORDER_TYPE_SELL if direction == "long" else mt5.ORDER_TYPE_BUY
     close_price = tick.bid if direction == "long" else tick.ask
 
@@ -304,7 +321,7 @@ def mt5_close_trade(ticket: int, symbol: str, direction: str, volume: float) -> 
         "magic":        MT5_MAGIC,
         "comment":      "auto_close",
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(info) if info else mt5.ORDER_FILLING_IOC,
     }
 
     result = mt5.order_send(request)
