@@ -753,7 +753,7 @@ class MarketMonitor:
             info = await self.mt5.get_account_info()
             if "error" in info:
                 return
-            await self.risk.refresh_equity(info["equity"], info["balance"])
+            await self.risk.refresh_equity(info["equity"], info["balance"], info.get("currency", ""))
         except Exception as e:
             log.warning("Account refresh failed: %s", e)
 

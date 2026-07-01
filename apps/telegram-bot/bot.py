@@ -590,16 +590,20 @@ async def cmd_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             status_line = "⏸️ Pause (manuel)"
         else:
             status_line = "✅ Aktiv"
+        currency = s.get("currency", "?")
+        currency_warn = "" if currency == "DKK" else f"\n⚠️ Konto-valuta er `{currency}`, ikke DKK — 100-kr loftet gælder i {currency}, ikke nødvendigvis danske kroner."
         msg = (
             f"📐 *Risk-status*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Status: {status_line}\n\n"
+            f"Status: {status_line}\n"
+            f"Konto-valuta: `{currency}`{currency_warn}\n\n"
             f"💰 Equity: `{s.get('equity', 0):,.2f}`\n"
             f"📉 Dagens start: `{s.get('day_start_equity', 0):,.2f}`\n"
             f"📈 Peak: `{s.get('peak_equity', 0):,.2f}`\n\n"
             f"Max dagligt tab: *{s.get('max_daily_loss_pct', 0):.1f}%*\n"
             f"Max drawdown: *{s.get('max_drawdown_pct', 0):.1f}%*\n"
-            f"Risiko/trade: *{s.get('risk_per_trade_pct', 0):.1f}%*"
+            f"Risiko/trade: *{s.get('risk_per_trade_pct', 0):.1f}%* "
+            f"(hård grænse: *{s.get('max_loss_per_trade', 0):,.0f} {currency}* pr. trade)"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
