@@ -290,6 +290,8 @@ async def chat(
             log.error("AI call error (round %d): %s", round_num, e)
             if key == "ollama" and any(x in err for x in ("connect", "refused", "timeout", "loading", "not found")):
                 return {"reply": "Jeg starter op — det tager et øjeblik første gang. Prøv igen om lidt ⏳"}
+            if key == "ollama" and any(x in err for x in ("502", "503", "504", "bad gateway", "service unavailable", "gateway timeout", "no tunnel")):
+                return {"reply": "Ollama-tunnelen fra din Mac er nede. Kør `./start_ollama_tunnel.sh` igen på din Mac, så virker jeg igen om lidt."}
             if any(x in err for x in ("rate limit", "429", "too many")):
                 return {"reply": "For mange forespørgsler på én gang. Prøv igen om et øjeblik."}
             if any(x in err for x in ("401", "403", "unauthorized", "forbidden", "invalid api")):
