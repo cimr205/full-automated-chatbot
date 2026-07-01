@@ -17,7 +17,6 @@ The 7 factors (max combined boost ≈ +0.31):
   7. htf_trend        4H trend (EMA50/200) agrees with the trade direction
 """
 from .indicators import ema, rsi as _rsi, volume_ratio
-from .signal_engine import detect_fvg
 
 
 def check_all(
@@ -227,6 +226,7 @@ def _fvg_1h(direction, ohlcv_15m, ohlcv_1h, ohlcv_4h, asian_sweep):
     if not ohlcv_1h:
         return False, "", 0.04
 
+    from .signal_engine import detect_fvg
     fvg = detect_fvg(ohlcv_1h)
     if not fvg:
         return False, "", 0.04
