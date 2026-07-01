@@ -1112,6 +1112,42 @@ async def listen_notifications(bot):
             log.error("Notification error: %s", e)
 
 
+# ── Health check server ────────────────────────────────────────────────────────
+# bot.py is a pure long-polling worker — it never binds a port. If Railway has
+# (or ever gets) a public domain/healthcheck pointed at this service, that would
+# 404/502 forever with no way to tell "bot crashed" from "bot fine, wrong port"
+# apart. This gives Railway (and us) something to actually check.
+
+async def _health_server():
+    port = int(os.getenv("PORT", "8080"))
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            try:
+                await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+            except Exception:
+                pass
+            ok = redis_client is not None and market_monitor is not None
+            body = json.dumps({
+                "status": "ok" if ok else "starting",
+                "market_monitor": bool(market_monitor),
+            }).encode()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            await writer.drain()
+        except Exception as e:
+            log.warning("Health server request error: %s", e)
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    log.info("Health check server listening on :%d", port)
+    async with server:
+        await server.serve_forever()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
@@ -1153,6 +1189,7 @@ async def main():
     await app.updater.start_polling(drop_pending_updates=True)
     asyncio.create_task(listen_notifications(app.bot))
     asyncio.create_task(market_monitor.run())
+    asyncio.create_task(_health_server())
 
     log.info("Telegram bot started — full AI + trading monitor + vault + brain enabled")
     await asyncio.Event().wait()
