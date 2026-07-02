@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Position Manager — tracks all open and closed trades in Redis.
 
@@ -13,7 +15,7 @@ from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 
-from . import learning
+from . import learning, retrospective
 
 log = logging.getLogger(__name__)
 
@@ -23,10 +25,10 @@ MONITOR_INTERVAL = 60                          # seconds between price checks
 
 
 class PositionManager:
-    def __init__(self, redis: aioredis.Redis, mt5_bridge=None):
+    def __init__(self, redis: aioredis.Redis):
         self._redis   = redis
-        self._mt5     = mt5_bridge
         self._running = False
+        self._mt5     = None   # injected by MarketMonitor after both are created
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -114,6 +116,11 @@ class PositionManager:
             await learning.record_outcome(self._redis, trade)
         except Exception as e:
             log.warning("Learning record failed: %s", e)
+
+        try:
+            await retrospective.analyse_trade(self._redis, trade)
+        except Exception as e:
+            log.warning("Retrospective analyse failed: %s", e)
 
         return trade
 
@@ -218,15 +225,17 @@ class PositionManager:
         """Current price via MT5 (bid/ask midpoint) — replaces Yahoo Finance,
         which blocks/rate-limits Railway's outbound IP. The broker enforces
         the real SL/TP on its own regardless of this check; this just drives
-        Telegram close-notifications, partial-TP reminders, and learning."""
+        Telegram close-notifications, auto-breakeven, and learning."""
         if self._mt5 is None:
             return None
         try:
             tick = await self._mt5.get_tick(symbol)
             if "error" in tick:
+                log.debug("[%s] MT5 tick fetch failed: %s", symbol, tick["error"])
                 return None
             return (tick["bid"] + tick["ask"]) / 2
-        except Exception:
+        except Exception as e:
+            log.warning("[%s] MT5 price fetch failed: %s", symbol, e)
             return None
 
     async def _evaluate_position(self, trade: dict, price: float):
@@ -264,11 +273,30 @@ class PositionManager:
             await self._notify_close(closed, "🎯 Take Profit ramt")
             return
 
-        # Partial profit level hit — notify (user moves SL to BE manually)
+        # Partial profit level hit — take note and auto-move SL to breakeven on MT5
         if partial_hit:
             trade["partial_taken"] = True
+            trade["stop_loss"] = entry   # update local record to BE
             await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
             await self._notify_partial(trade, price)
+
+            # Auto-move SL to breakeven on MT5 if bridge is available
+            if self._mt5:
+                try:
+                    mod_result = await self._mt5.modify_trade(
+                        trade_id=trade_id,
+                        symbol=trade["symbol"],
+                        new_sl=entry,
+                        new_tp=trade["take_profit"],
+                    )
+                    if "error" in mod_result:
+                        log.warning("[%s] Auto-BE move failed on MT5: %s",
+                                    trade["symbol"], mod_result["error"])
+                    else:
+                        log.info("[%s] SL moved to breakeven @ %s on MT5",
+                                 trade["symbol"], entry)
+                except Exception as e:
+                    log.warning("[%s] Auto-BE move exception: %s", trade["symbol"], e)
 
     async def _notify_close(self, trade: dict, reason: str):
         if not trade:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Signal engine — implements the full trading rulebook:
 
@@ -11,18 +13,18 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .indicators import rsi, ema, macd, bollinger, atr, volume_ratio, stochastic
+from . import asian_range as _asian_range
+from . import confluences as _confluences
 
 CET           = ZoneInfo("Europe/Paris")
 MIN_CONFLUENCE = 3      # minimum 3 independent factors
-# ATR_SL_MULT lowered from 1.5 to 1.0 on 2026-06-24 based on
-# core/trading/optimize.py's parameter sweep (~2yr 1h data, EURUSD/GBPUSD/
-# GC=F/USDJPY/GBPJPY): every top-10 result converged on SL=1.0x ATR with
-# TP unchanged at 3x ATR (so realized R:R is now 3:1, not 2:1). Lower raw
-# win rate (~48%) but materially better expectancy: +0.93R/trade average
-# vs the old 1.5x setting, which didn't place in the top 10 of 56 tested
-# combinations. Re-run the sweep periodically — markets drift.
-ATR_SL_MULT    = 1.0    # stop loss = 1.0x ATR below/above entry
-ATR_TP_MULT    = 3.0    # take profit = 3x ATR  →  1:3 R:R
+# ATR_SL_MULT reduced 80% (from 1.0 to 0.2) on 2026-06-26 per user instruction:
+# too many trades were stopped out on normal noise before the move played out.
+# A tighter SL means smaller dollar loss per losing trade and larger R:R on winners.
+# TP raised to 5x ATR to maintain minimum 1:2 R:R with the compressed SL distance.
+# Risk: higher chance of being stopped on intrabar wicks — monitor closely.
+ATR_SL_MULT    = 0.2    # stop loss = 0.2x ATR below/above entry  (was 1.0)
+ATR_TP_MULT    = 5.0    # take profit = 5x ATR  →  1:25 R:R minimum
 PARTIAL_R      = 1.5    # partial profits at 1.5R
 MIN_RR         = 2.0    # reject trades with < 1:2 R:R
 
@@ -257,6 +259,7 @@ def score_signal(
     ohlcv_1h:  list,
     ohlcv_4h:  list | None = None,
     ohlcv_1d:  list | None = None,
+    ohlcv_15m: list | None = None,   # 15-minute data for entry timing + Asian range
     at:        datetime | None = None,   # backtesting: pass the candle's own timestamp
     min_confluence: float | None = None,  # per-symbol overrides (see market_monitor.SYMBOL_OVERRIDES)
     atr_sl_mult:    float | None = None,
@@ -308,6 +311,15 @@ def score_signal(
     e50_val  = base.get("e50", price)
     e200_val = base.get("e200", price)
 
+    # ── Asian Range Sweep (15m) — highest priority setup for gold ──────────────
+    # When 15m data is available, check for the classic London-open liquidity grab
+    # first. If found, it overrides ATR-based SL/TP with sweep-wick levels.
+    asian_sweep     = None
+    custom_sl       = None   # set if Asian sweep overrides ATR-based SL
+    custom_tp       = None
+    if ohlcv_15m and len(ohlcv_15m) >= 10:
+        asian_sweep = _asian_range.detect(ohlcv_15m, at=at)
+
     # ── Setup detection on 1h (primary execution timeframe) ──
     # "type" is a stable category (e.g. "bullish_fvg") used for grouping/learning;
     # "label" is the human-readable string with the specific price levels for display.
@@ -317,6 +329,27 @@ def score_signal(
     setup_kinds = []   # stable categories
     setup_limit_price = None
     LIMIT_ORDER_KINDS = {"bullish_fvg", "bearish_fvg", "bullish_break_retest", "bearish_break_retest"}
+
+    # ── Gold confluence checks (7 factors) ───────────────────────────────────
+    # Run BEFORE setup detection so confirmed confluences can boost confidence
+    # and appear in the Telegram signal message as specific reasons.
+    confluence_boost  = 0.0
+    confluence_labels = []
+    if ohlcv_15m:
+        confluence_boost, confluence_labels = _confluences.check_all(
+            direction, ohlcv_15m, ohlcv_1h, ohlcv_4h if ohlcv_4h else [], asian_sweep
+        )
+        all_reasons.extend(confluence_labels)
+        confidence = min(0.97, confidence + confluence_boost)
+
+    # Inject Asian sweep as the primary setup (before 1H detectors)
+    if asian_sweep and asian_sweep["direction"] == direction:
+        setups.append(asian_sweep["label"])
+        setup_kinds.append(asian_sweep["type"])
+        custom_sl = asian_sweep["sl_level"]
+        custom_tp = asian_sweep["tp_level"]
+        all_reasons.insert(0, f"Asian Range Sweep — {asian_sweep['type'].split('_')[0].capitalize()} setup ({asian_sweep['rr']:.1f}:1 R:R)")
+
     for detector in (detect_fvg, detect_break_retest, detect_liquidity_grab, detect_trend_pullback):
         result = detector(ohlcv_1h)
         if result:
@@ -329,18 +362,29 @@ def score_signal(
 
     setup_type  = setup_kinds[0] if setup_kinds else None
     setup_label = setups[0] if setups else None
-    order_type  = "limit" if (setup_type in LIMIT_ORDER_KINDS and setup_limit_price) else "market"
+    order_type  = "limit" if (setup_type in LIMIT_ORDER_KINDS and setup_limit_price and not asian_sweep) else "market"
     entry_price = setup_limit_price if order_type == "limit" else price
 
     # ── Price levels (relative to entry_price — the limit level if pending, else market) ──
+    if entry_price <= 0:
+        return {**no_signal, "reasons": ["Ugyldig entry-pris (0)"]}
+
     if direction == "long":
-        stop_loss   = entry_price - atr_sl_mult * atr_val
-        take_profit = entry_price + atr_tp_mult * atr_val
-        partial_tp  = entry_price + PARTIAL_R   * atr_val
+        stop_loss   = custom_sl if custom_sl else entry_price - atr_sl_mult * atr_val
+        take_profit = custom_tp if custom_tp else entry_price + atr_tp_mult * atr_val
+        partial_tp  = entry_price + PARTIAL_R * atr_val
     else:
-        stop_loss   = entry_price + atr_sl_mult * atr_val
-        take_profit = entry_price - atr_tp_mult * atr_val
-        partial_tp  = entry_price - PARTIAL_R   * atr_val
+        stop_loss   = custom_sl if custom_sl else entry_price + atr_sl_mult * atr_val
+        take_profit = custom_tp if custom_tp else entry_price - atr_tp_mult * atr_val
+        partial_tp  = entry_price - PARTIAL_R * atr_val
+
+    # Validate levels are on the correct sides before the checklist
+    if direction == "long" and not (stop_loss < entry_price < take_profit):
+        return {**no_signal, "reasons": [f"Ugyldige niveauer for LONG (SL={stop_loss:.5g} EP={entry_price:.5g} TP={take_profit:.5g})"]}
+    if direction == "short" and not (take_profit < entry_price < stop_loss):
+        return {**no_signal, "reasons": [f"Ugyldige niveauer for SHORT (TP={take_profit:.5g} EP={entry_price:.5g} SL={stop_loss:.5g})"]}
+    if stop_loss <= 0 or take_profit <= 0:
+        return {**no_signal, "reasons": ["Nul eller negativ SL/TP"]}
 
     rr_ratio = abs(take_profit - entry_price) / max(abs(stop_loss - entry_price), 1e-10)
 
@@ -362,6 +406,12 @@ def score_signal(
         "7_active_session":   sess["tradeable"],
         "8_setup_identified": bool(setup_type),
     }
+
+    # Pullback setups have 0% win rate in backtest across all symbols — block at signal level.
+    # This is a second line of defence after learning.is_blocked(); if learning Redis is
+    # unavailable for any reason this guard still prevents the worst setups from executing.
+    if setup_type in ("bullish_pullback", "bearish_pullback"):
+        return {**no_signal, "reasons": [f"{setup_type} er blokeret (0% WR i backtest)"]}
 
     # Hard blockers: trend, confluence, R:R, session must all pass
     hard_checks = ["1_trend_aligned", "2_confluence_3plus", "4_rr_min_1_2", "7_active_session"]
@@ -387,9 +437,11 @@ def score_signal(
         "vol_ratio":    base.get("vol_ratio", 1.0),
         "pct_b":        base.get("pct_b", 0.5),
         "atr":          atr_val,
-        "timeframes":   len(frames),
-        "session":      sess,
-        "confluence":   confluence,
-        "checklist":    checklist,
-        "checklist_ok": checklist_ok,
+        "timeframes":         len(frames),
+        "session":            sess,
+        "confluence":         confluence,
+        "confluence_boost":   confluence_boost,
+        "confluence_labels":  confluence_labels,
+        "checklist":          checklist,
+        "checklist_ok":       checklist_ok,
     }

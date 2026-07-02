@@ -125,6 +125,21 @@ def _initialize() -> bool:
 
 # ── MT5 execution ─────────────────────────────────────────────────────────────
 
+def _pick_filling_mode(info) -> int:
+    """
+    Brokers vary in which order-filling mode they accept per symbol — hardcoding
+    IOC causes silent 'Unsupported filling mode' rejections on brokers that only
+    support FOK (or only RETURN, for exchange-traded instruments). Pick the first
+    mode this symbol's filling_mode bitmask actually advertises support for.
+    """
+    mode = getattr(info, "filling_mode", 0)
+    if mode & mt5.SYMBOL_FILLING_IOC:
+        return mt5.ORDER_FILLING_IOC
+    if mode & mt5.SYMBOL_FILLING_FOK:
+        return mt5.ORDER_FILLING_FOK
+    return mt5.ORDER_FILLING_RETURN
+
+
 def mt5_open_trade(symbol: str, direction: str, volume: float,
                    sl: float, tp: float, comment: str = "",
                    order_type: str = "market", limit_price: float = 0) -> dict:
@@ -167,7 +182,7 @@ def mt5_open_trade(symbol: str, direction: str, volume: float,
         "magic":        MT5_MAGIC,
         "comment":      comment[:31],
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(info),
     }
 
     result = mt5.order_send(request)
@@ -302,6 +317,55 @@ def mt5_get_tick(symbol: str) -> dict:
     return {"bid": tick.bid, "ask": tick.ask}
 
 
+def mt5_modify_trade(ticket: int, symbol: str, new_sl: float, new_tp: float) -> dict:
+    """Update SL/TP on an already-open position (e.g. auto-move to breakeven)."""
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    request = {
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "position": ticket,
+        "symbol":   symbol,
+        "sl":       new_sl,
+        "tp":       new_tp,
+    }
+    result = mt5.order_send(request)
+    mt5.shutdown()
+
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        err = result.comment if result else "None"
+        return {"error": f"SL/TP opdatering fejlede: {err}"}
+    return {"modified": True, "ticket": ticket, "sl": new_sl, "tp": new_tp}
+
+
+def mt5_get_open_positions() -> dict:
+    """All positions currently open on MT5 — used to reconcile against Redis."""
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    positions = mt5.positions_get()
+    mt5.shutdown()
+    if positions is None:
+        return {"positions": []}
+
+    return {"positions": [
+        {
+            "ticket":     p.ticket,
+            "symbol":     p.symbol,
+            "direction":  "long" if p.type == mt5.ORDER_TYPE_BUY else "short",
+            "volume":     p.volume,
+            "price_open": p.price_open,
+            "sl":         p.sl,
+            "tp":         p.tp,
+        }
+        for p in positions
+    ]}
+
+
 def mt5_get_rates(symbol: str, timeframe: str, count: int) -> dict:
     """Historical OHLCV straight from the broker — replaces Yahoo Finance,
     which blocks/rate-limits cloud datacenter IPs (Railway included) and
@@ -311,7 +375,8 @@ def mt5_get_rates(symbol: str, timeframe: str, count: int) -> dict:
     if not _initialize():
         return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
 
-    tf_map = {"1h": mt5.TIMEFRAME_H1, "4h": mt5.TIMEFRAME_H4, "1d": mt5.TIMEFRAME_D1}
+    tf_map = {"15m": mt5.TIMEFRAME_M15, "1h": mt5.TIMEFRAME_H1,
+              "4h": mt5.TIMEFRAME_H4, "1d": mt5.TIMEFRAME_D1}
     mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_H1)
 
     info = mt5.symbol_info(symbol)
@@ -346,6 +411,8 @@ def mt5_close_trade(ticket: int, symbol: str, direction: str, volume: float) -> 
         mt5.shutdown()
         return {"error": f"Ingen tick data for {symbol}"}
 
+    info = mt5.symbol_info(symbol)
+
     close_type  = mt5.ORDER_TYPE_SELL if direction == "long" else mt5.ORDER_TYPE_BUY
     close_price = tick.bid if direction == "long" else tick.ask
 
@@ -359,7 +426,7 @@ def mt5_close_trade(ticket: int, symbol: str, direction: str, volume: float) -> 
         "magic":        MT5_MAGIC,
         "comment":      "auto_close",
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(info) if info else mt5.ORDER_FILLING_IOC,
     }
 
     result = mt5.order_send(request)
@@ -470,6 +537,30 @@ async def handle_command(cmd: dict, redis: aioredis.Redis):
         }
         if "error" in result:
             log.error("symbol_info fejlede for %s: %s", symbol, result["error"])
+
+    elif command == "modify_trade" and ticket:
+        new_sl  = float(cmd.get("new_sl", 0))
+        new_tp  = float(cmd.get("new_tp", 0))
+        result  = mt5_modify_trade(int(ticket), symbol, new_sl, new_tp)
+        payload = {
+            "trade_id": trade_id,
+            "command":  "modify_trade",
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+        if result.get("modified"):
+            log.info("SL/TP opdateret: ticket=%s sl=%s tp=%s", ticket, new_sl, new_tp)
+        else:
+            log.error("SL/TP opdatering fejlede: %s", result.get("error"))
+
+    elif command == "get_open_positions":
+        result  = mt5_get_open_positions()
+        payload = {
+            "trade_id": trade_id,
+            "command":  "get_open_positions",
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
 
     elif command == "get_tick":
         result  = mt5_get_tick(symbol)

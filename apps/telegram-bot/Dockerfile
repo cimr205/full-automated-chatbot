@@ -10,4 +10,5 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+EXPOSE 8080
 CMD ["python", "apps/telegram-bot/bot.py"]

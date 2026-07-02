@@ -20,6 +20,11 @@ log = logging.getLogger(__name__)
 RISK_PER_TRADE_PCT        = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
 MAX_DAILY_LOSS_PCT        = float(os.getenv("RISK_MAX_DAILY_LOSS_PCT", "4.0"))
 MAX_TOTAL_DRAWDOWN_PCT    = float(os.getenv("RISK_MAX_TOTAL_DRAWDOWN_PCT", "8.0"))
+# Hard ceiling in account currency — no single trade's stop-loss may ever risk more than
+# this, regardless of what RISK_PER_TRADE_PCT computes. Assumes the MT5 account currency
+# matches this value's currency (DKK by default) — check /risk, which shows the account's
+# actual currency, and adjust this env var if the account isn't in DKK.
+MAX_LOSS_PER_TRADE        = float(os.getenv("RISK_MAX_LOSS_PER_TRADE", "100"))
 
 DAY_START_KEY  = "trading:risk:day_start_equity"
 DAY_DATE_KEY   = "trading:risk:day_date"
@@ -27,6 +32,7 @@ PEAK_KEY       = "trading:risk:peak_equity"
 LAST_KEY       = "trading:risk:last_equity"
 LOCK_KEY       = "trading:risk:locked"
 PAUSED_KEY     = "trading:paused"
+CURRENCY_KEY   = "trading:risk:currency"
 
 
 class RiskManager:
@@ -36,8 +42,11 @@ class RiskManager:
 
     # ── Equity tracking ───────────────────────────────────────────────────────
 
-    async def refresh_equity(self, equity: float, balance: float) -> dict:
+    async def refresh_equity(self, equity: float, balance: float, currency: str = "") -> dict:
         """Call once per scan cycle with fresh account info from MT5Bridge."""
+        if currency:
+            await self._redis.set(CURRENCY_KEY, currency)
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         stored_date = await self._redis.get(DAY_DATE_KEY)
 
@@ -77,6 +86,8 @@ class RiskManager:
             "drawdown_pct": round(drawdown_pct, 2),
             "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
             "max_drawdown_pct": MAX_TOTAL_DRAWDOWN_PCT,
+            "max_loss_per_trade": MAX_LOSS_PER_TRADE,
+            "currency": await self._redis.get(CURRENCY_KEY) or "?",
             "locked": bool(await self._redis.get(LOCK_KEY)),
             "paused": bool(await self._redis.get(PAUSED_KEY)),
         }
@@ -101,6 +112,8 @@ class RiskManager:
             "max_daily_loss_pct":   MAX_DAILY_LOSS_PCT,
             "max_drawdown_pct":     MAX_TOTAL_DRAWDOWN_PCT,
             "risk_per_trade_pct":   RISK_PER_TRADE_PCT,
+            "max_loss_per_trade":   MAX_LOSS_PER_TRADE,
+            "currency":             await self._redis.get(CURRENCY_KEY) or "?",
         }
 
     async def unlock(self) -> bool:
@@ -121,8 +134,13 @@ class RiskManager:
     # ── Position sizing ───────────────────────────────────────────────────────
 
     def risk_amount(self, equity: float) -> float:
-        """Amount of account currency to risk on a single trade."""
-        return equity * (RISK_PER_TRADE_PCT / 100)
+        """
+        Amount of account currency to risk on a single trade — the smaller of the
+        %-of-equity calc and the hard MAX_LOSS_PER_TRADE ceiling, so a single stop-loss
+        can never lose more than that fixed amount no matter how equity grows.
+        """
+        pct_based = equity * (RISK_PER_TRADE_PCT / 100)
+        return min(pct_based, MAX_LOSS_PER_TRADE)
 
     @staticmethod
     def compute_volume(risk_amount: float, sl_distance: float, symbol_info: dict) -> float:

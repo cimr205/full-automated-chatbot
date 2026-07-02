@@ -23,18 +23,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from core.memory.brain import Brain
 from core.memory.vault import SecureVault
+from core.trading.market_monitor import MarketMonitor
+from core.trading import learning as trading_learning
+from core.trading import retrospective as trading_retrospective
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
-API_URL = os.getenv("API_URL", "http://api:8000")
+API_URL = os.getenv("API_URL", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
 redis_client: aioredis.Redis = None
 vault: SecureVault = None
 brain: Brain = None
+market_monitor: MarketMonitor = None
+positions = None
 
 
 async def _ws_event(event_type: str, text: str, task_id: str = None):
@@ -55,6 +60,8 @@ async def auth(update: Update) -> bool:
 
 
 async def api_get(path: str) -> dict:
+    if not API_URL:
+        raise RuntimeError("API_URL ikke sat — sæt den i Railway Variables")
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(f"{API_URL}{path}")
         resp.raise_for_status()
@@ -62,6 +69,8 @@ async def api_get(path: str) -> dict:
 
 
 async def api_post(path: str, body: dict, timeout: int = 10) -> dict:
+    if not API_URL:
+        raise RuntimeError("API_URL ikke sat — sæt den i Railway Variables")
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{API_URL}{path}", json=body)
         resp.raise_for_status()
@@ -87,16 +96,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     await update.message.reply_text(
-        "*Autonomous Execution System*\n\n"
+        "🥇 *XAUUSD Trading Bot*\n\n"
         "*Bare skriv til mig — AI forstår naturligt sprog.*\n\n"
-        "*📊 Trading*\n"
+        "*📊 Trading (Gold only — 1 trade/dag)*\n"
+        "/market — dagsoverblik: Asian range, nyheder, slot-status\n"
         "/trades — åbne trades + statistik\n"
-        "/trade SYM long ENTRY sl=X tp=Y — log trade manuelt\n"
+        "/trade XAUUSD long ENTRY sl=X tp=Y — log trade manuelt\n"
         "/close <id> [pris] — luk trade\n"
         "/why <id> — grundlag for trade\n"
-        "/market — seneste signaler\n"
-        "/watchlist — vis/ændr overvågningsliste\n"
-        "/scan — scan markedet NU\n\n"
+        "/scan — scan markedet NU\n"
+        "/lektioner — fuld retrospektiv analyse\n"
+        "/lessons — win rate per setup-type\n\n"
         "*Opgaver & Mål*\n"
         "/task <desc> — kø en-gangs opgave\n"
         "/goal <desc> — opret vedvarende mål\n"
@@ -105,7 +115,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/goals — vis aktive mål\n"
         "/status <id> — opgavestatus\n"
         "/stop <id> — stop kørende opgave\n"
-        "/pause <id> / /resume <id> / /cancel <id>\n\n"
+        "/pause <id> / /resume <id> / /cancel_goal <id>\n\n"
         "*Vault (krypteret)*\n"
         "/vault save <navn> <værdi> — gem credentials\n"
         "/vault get <navn> — hent (slettes om 30s)\n"
@@ -283,11 +293,11 @@ async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
-async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_cancel_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     if not ctx.args:
-        await update.message.reply_text("Usage: /cancel <goal_id>")
+        await update.message.reply_text("Usage: /cancel_goal <goal_id>")
         return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -302,12 +312,21 @@ async def cmd_health(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     try:
-        h = await api_get("/health")
+        ping = await redis_client.ping()
+        queue_length = await redis_client.llen("task:queue") or 0
+        active_task = await redis_client.get("task:active") or "ingen"
+        goals_count = await redis_client.scard("goals:active") or 0
+        monitor_status = "✅ Kører" if market_monitor else "⚠️ Ikke startet"
+        paused = await redis_client.get("trading:paused")
+        trading_status = "⏸️ Pause" if paused else "✅ Aktiv"
         await update.message.reply_text(
             f"*Systemstatus*\n"
-            f"Kø: {h.get('queue_length', 0)} ventende\n"
-            f"Aktiv opgave: `{h.get('active_task') or 'ingen'}`\n"
-            f"Aktive mål: {h.get('active_goals', 0)}",
+            f"Redis: {'✅' if ping else '❌'}\n"
+            f"MarketMonitor: {monitor_status}\n"
+            f"Trading: {trading_status}\n"
+            f"Kø: {queue_length} ventende\n"
+            f"Aktiv opgave: `{active_task}`\n"
+            f"Aktive mål: {goals_count}",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -427,22 +446,44 @@ async def cmd_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     try:
-        signals = await api_get("/trading/signals?limit=10")
-        if not signals:
-            await update.message.reply_text("Ingen signaler endnu. Monitoren scanner hvert 10. minut.")
-            return
-        lines = []
-        for s in signals[:8]:
-            d = "📈" if s.get("direction") == "long" else "📉"
-            conf = f"{s.get('confidence', 0):.0%}"
-            sym = s.get("symbol", "?")
-            price = s.get("price", 0)
-            ts = s.get("ts", "")[:16].replace("T", " ")
-            lines.append(f"{d} *{sym}* {conf} @ {price:.4g} _{ts}_")
-        await update.message.reply_text(
-            "*Seneste handelssignaler:*\n\n" + "\n".join(lines),
-            parse_mode="Markdown"
-        )
+        from core.trading import news_filter, asian_range as ar
+        from core.trading.market_monitor import DEFAULT_FOREX
+        from datetime import datetime, timezone
+
+        lines = ["🥇 *XAUUSD — Dagsoverblik*\n"]
+
+        # ── News filter status ────────────────────────────────────────────────
+        try:
+            news_blocked, news_reason = await news_filter.is_blocked_by_news()
+            if news_blocked:
+                lines.append(f"📰 {news_reason}\n")
+            else:
+                upcoming = await news_filter.next_event_description()
+                lines.append(f"📰 *Kommende nyheder:*\n{upcoming}\n")
+        except Exception:
+            pass
+
+        # ── Daily trade status ────────────────────────────────────────────────
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        count = await redis_client.get(f"trading:daily_signals:{today}")
+        trades_today = int(count or 0)
+        cap_tag = "✅ Slot ledig" if trades_today == 0 else "🔒 Dagens trade er taget"
+        lines.append(f"📊 Dagens handel: *{trades_today}/1* — {cap_tag}\n")
+
+        # ── Seneste signaler ──────────────────────────────────────────────────
+        raw_signals = await redis_client.lrange("trading:signal_history", 0, 4)
+        signals = [json.loads(r) for r in raw_signals] if raw_signals else []
+        if signals:
+            lines.append("*Seneste signaler:*")
+            for s in signals[:4]:
+                d = "📈" if s.get("direction") == "long" else "📉"
+                conf = f"{s.get('confidence', 0):.0%}"
+                price = s.get("price", 0)
+                ts = s.get("ts", "")[:16].replace("T", " ")
+                setup = s.get("setup_type", "?")
+                lines.append(f"  {d} {conf} @ {price:,.2f} _{ts}_ — {setup}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -455,16 +496,19 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # /watchlist stocks SPY,QQQ,NVDA
     if not ctx.args:
         try:
-            cfg = await api_get("/trading/config")
-            forex  = ", ".join(cfg.get("forex", []))
-            stocks = ", ".join(cfg.get("stocks", []))
-            conf   = cfg.get("confidence", 0.68)
+            forex_raw  = await redis_client.get("trading:watchlist:forex")
+            stocks_raw = await redis_client.get("trading:watchlist:stocks")
+            conf_raw   = await redis_client.get("trading:confidence")
+            from core.trading.market_monitor import DEFAULT_FOREX, DEFAULT_STOCKS
+            forex  = forex_raw or ",".join(DEFAULT_FOREX)
+            stocks = stocks_raw or ",".join(DEFAULT_STOCKS)
+            conf   = float(conf_raw) if conf_raw else 0.68
             await update.message.reply_text(
                 f"*Overvågningsliste*\n\n"
                 f"💱 *Forex:*\n{forex}\n\n"
                 f"📊 *Aktier/Indeks:*\n{stocks}\n\n"
                 f"Confidence threshold: {conf:.0%}\n\n"
-                f"Brug `/watchlist forex EUR/USD=X,GBP/USD=X` for at ændre.",
+                f"Brug `/watchlist forex EURUSD=X,GBPUSD=X` for at ændre.",
                 parse_mode="Markdown"
             )
         except Exception as e:
@@ -475,10 +519,9 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if market_type not in ("forex", "stocks") or len(ctx.args) < 2:
         await update.message.reply_text("Usage: /watchlist forex EURUSD=X,GBPUSD=X\neller: /watchlist stocks SPY,QQQ")
         return
-    symbols = ctx.args[1].split(",")
+    symbols = [s.strip() for s in ctx.args[1].split(",")]
     try:
-        body = {market_type: [s.strip() for s in symbols]}
-        await api_post("/trading/config", body)
+        await redis_client.set(f"trading:watchlist:{market_type}", ",".join(symbols))
         await update.message.reply_text(
             f"✅ {market_type.capitalize()} watchlist opdateret:\n" + ", ".join(symbols),
             parse_mode="Markdown"
@@ -490,22 +533,25 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
-    try:
-        await api_post("/trading/scan-now", {})
-        await update.message.reply_text(
-            "🔍 Scanner markedet nu... Du får besked hvis der er et signal.",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Fejl: {e}")
+    if not market_monitor:
+        await update.message.reply_text("MarketMonitor er ikke klar endnu. Prøv igen om et øjeblik.")
+        return
+    asyncio.create_task(market_monitor._scan_all())
+    await update.message.reply_text(
+        "🔍 Scanner markedet nu... Du får besked hvis der er et signal.",
+        parse_mode="Markdown"
+    )
 
 
 async def cmd_chart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Send the watchlist overview chart on demand (no longer sent automatically)."""
     if not await auth(update):
         return
+    if not market_monitor:
+        await update.message.reply_text("MarketMonitor er ikke klar endnu.")
+        return
     try:
-        await api_post("/trading/chart-now", {})
+        await market_monitor._send_watchlist_chart()
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -514,49 +560,50 @@ async def cmd_trading_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Pause the auto-trading scanner (it keeps monitoring open positions)."""
     if not await auth(update):
         return
-    try:
-        await api_post("/trading/pause", {})
-        await update.message.reply_text(
-            "⏸️ Auto-trading sat på pause. Åbne positioner overvåges stadig. /trading_resume for at genoptage.",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Fejl: {e}")
+    await redis_client.set("trading:paused", "1")
+    await update.message.reply_text(
+        "⏸️ Auto-trading sat på pause. Åbne positioner overvåges stadig. /trading_resume for at genoptage.",
+        parse_mode="Markdown"
+    )
 
 
 async def cmd_trading_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Resume the auto-trading scanner."""
     if not await auth(update):
         return
-    try:
-        await api_post("/trading/resume", {})
-        await update.message.reply_text("▶️ Auto-trading genoptaget.", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"Fejl: {e}")
+    await redis_client.delete("trading:paused")
+    await update.message.reply_text("▶️ Auto-trading genoptaget.", parse_mode="Markdown")
 
 
 async def cmd_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show current risk status: equity, daily/total drawdown, lock state."""
     if not await auth(update):
         return
+    if not market_monitor:
+        await update.message.reply_text("MarketMonitor er ikke klar endnu.")
+        return
     try:
-        s = await api_get("/trading/risk")
+        s = await market_monitor.risk.status()
         if s.get("locked"):
             status_line = f"🔒 LÅST — {s['locked']}"
         elif s.get("paused"):
             status_line = "⏸️ Pause (manuel)"
         else:
             status_line = "✅ Aktiv"
+        currency = s.get("currency", "?")
+        currency_warn = "" if currency == "DKK" else f"\n⚠️ Konto-valuta er `{currency}`, ikke DKK — 100-kr loftet gælder i {currency}, ikke nødvendigvis danske kroner."
         msg = (
             f"📐 *Risk-status*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Status: {status_line}\n\n"
+            f"Status: {status_line}\n"
+            f"Konto-valuta: `{currency}`{currency_warn}\n\n"
             f"💰 Equity: `{s.get('equity', 0):,.2f}`\n"
             f"📉 Dagens start: `{s.get('day_start_equity', 0):,.2f}`\n"
             f"📈 Peak: `{s.get('peak_equity', 0):,.2f}`\n\n"
             f"Max dagligt tab: *{s.get('max_daily_loss_pct', 0):.1f}%*\n"
             f"Max drawdown: *{s.get('max_drawdown_pct', 0):.1f}%*\n"
-            f"Risiko/trade: *{s.get('risk_per_trade_pct', 0):.1f}%*"
+            f"Risiko/trade: *{s.get('risk_per_trade_pct', 0):.1f}%* "
+            f"(hård grænse: *{s.get('max_loss_per_trade', 0):,.0f} {currency}* pr. trade)"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
@@ -567,9 +614,12 @@ async def cmd_unlock_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Manually clear a tripped risk-lock after reviewing the account."""
     if not await auth(update):
         return
+    if not market_monitor:
+        await update.message.reply_text("MarketMonitor er ikke klar endnu.")
+        return
     try:
-        res = await api_post("/trading/unlock-risk", {})
-        if res.get("status") == "unlocked":
+        was_locked = await market_monitor.risk.unlock()
+        if was_locked:
             await update.message.reply_text("🔓 Risk-lock fjernet. Trading genoptaget.", parse_mode="Markdown")
         else:
             await update.message.reply_text("Der var ingen aktiv risk-lock.")
@@ -585,8 +635,13 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if period not in ("daily", "weekly"):
         await update.message.reply_text("Usage: /report daily|weekly")
         return
+    if not market_monitor:
+        await update.message.reply_text("MarketMonitor er ikke klar endnu.")
+        return
     try:
-        await api_get(f"/trading/report?period={period}")
+        from core.trading.reporting import send_report
+        await send_report(redis_client, positions, market_monitor.risk, period=period)
+        await update.message.reply_text(f"📊 {period.capitalize()} rapport sendt.")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -598,7 +653,8 @@ async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     symbol = ctx.args[0] if ctx.args else "EURUSD=X"
     await update.message.reply_text(f"⏳ Backtester {symbol} mod ~2 års historik — kan tage et minut...")
     try:
-        result = await api_get(f"/trading/backtest?symbol={symbol}")
+        from core.trading.backtest import run_backtest
+        result = await run_backtest(symbol)
         if "error" in result:
             await update.message.reply_text(f"Fejl: {result['error']}")
             return
@@ -621,9 +677,14 @@ async def cmd_seed_learning(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("⏳ Backtester hele watchlisten og forhåndsudfylder lærings-systemet...")
     try:
-        res = await api_post("/trading/seed-learning", {}, timeout=120)
-        n = len(res.get("results", {}))
-        await update.message.reply_text(f"✅ Forhåndsudfyldt med historik fra {n} symboler. Se /lessons.")
+        from core.trading.backtest import seed_learning
+        from core.trading.market_monitor import DEFAULT_FOREX, DEFAULT_STOCKS
+        forex_raw  = await redis_client.get("trading:watchlist:forex")
+        stocks_raw = await redis_client.get("trading:watchlist:stocks")
+        symbols = (forex_raw or ",".join(DEFAULT_FOREX)).split(",") + \
+                  (stocks_raw or ",".join(DEFAULT_STOCKS)).split(",")
+        results = await seed_learning(redis_client, [s.strip() for s in symbols if s.strip()])
+        await update.message.reply_text(f"✅ Forhåndsudfyldt med historik fra {len(results)} symboler. Se /lessons.")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -634,13 +695,14 @@ async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     try:
-        await api_post("/trading/optimize", {})
+        from core.trading.optimize import run_sweep
         await update.message.reply_text(
             "🧪 Parameter-optimering startet — tager 45-60 minutter. "
             "Du får en besked her når den er færdig med de bedste fundne indstillinger.\n\n"
             "_Rør ikke ved risikostyringen — kun signal-tærskler testes._",
             parse_mode="Markdown"
         )
+        asyncio.create_task(run_sweep())
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -650,7 +712,7 @@ async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     try:
-        stats = await api_get("/trading/lessons")
+        stats = await trading_learning.all_stats(redis_client)
         if not stats:
             await update.message.reply_text("Ingen lukkede trades endnu — ingen lektier at vise.")
             return
@@ -667,12 +729,27 @@ async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Fejl: {e}")
 
 
+async def cmd_lektioner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Full retrospective — analyse ALL past trades and send a breakdown."""
+    if not await auth(update):
+        return
+    await update.message.reply_text("🔍 Analyserer alle lukkede handler…")
+    try:
+        summary = await trading_retrospective.full_retrospective(redis_client)
+        await update.message.reply_text(summary, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Fejl: {e}")
+
+
 async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show all open trades."""
     if not await auth(update):
         return
+    if not positions:
+        await update.message.reply_text("Position manager er ikke klar endnu.")
+        return
     try:
-        trades = await api_get("/trading/trades")
+        trades = await positions.list_open()
         if not trades:
             await update.message.reply_text("Ingen åbne trades. Systemet scanner markedet automatisk.")
             return
@@ -692,7 +769,7 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"  Entry: `{entry}` | SL: `{sl}` | TP: `{tp}`\n"
                 f"  Åbnet: {t.get('opened_at','')[:16]}{cancel_hint}"
             )
-        stats = await api_get("/trading/stats")
+        stats = await positions.stats()
         stats_text = (
             f"\n\n📊 *Statistik ({stats.get('total',0)} lukkede trades):*\n"
             f"Win rate: {stats.get('win_rate',0):.0%}  |  "
@@ -734,11 +811,16 @@ async def cmd_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not sl or not tp:
             await update.message.reply_text("Angiv sl= og tp= værdier.")
             return
-        data = await api_post("/trading/trades", {
-            "symbol": symbol, "market": market, "direction": direction,
-            "entry": entry, "stop_loss": sl, "take_profit": tp,
-            "partial_tp": partial_tp, "note": note.strip(),
-        })
+        if not positions:
+            await update.message.reply_text("Position manager er ikke klar endnu.")
+            return
+        trade_id = await positions.open_trade(
+            symbol=symbol, market=market, direction=direction,
+            entry=entry, stop_loss=sl, take_profit=tp,
+            partial_tp=partial_tp, source="manual",
+            signal_data={"setup_type": note.strip()} if note.strip() else None,
+        )
+        data = {"trade_id": trade_id}
         def fmt(v): return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.2f}"
         rr = abs(tp - entry) / abs(sl - entry) if sl != entry else 0
         await update.message.reply_text(
@@ -763,14 +845,19 @@ async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     trade_id = ctx.args[0]
     try:
-        # Get current price if not specified
+        if not positions:
+            await update.message.reply_text("Position manager er ikke klar endnu.")
+            return
         if len(ctx.args) >= 2:
             exit_price = float(ctx.args[1])
         else:
-            trade = await api_get(f"/trading/trades/{trade_id}")
-            exit_price = trade.get("entry", 0)  # placeholder; position monitor will use live price
+            trade = await positions.get_trade(trade_id)
+            exit_price = trade.get("entry", 0) if trade else 0
 
-        data = await api_post(f"/trading/trades/{trade_id}/close?exit_price={exit_price}", {})
+        data = await positions.close_trade(trade_id, exit_price, reason="manual")
+        if not data:
+            await update.message.reply_text(f"Trade `{trade_id}` ikke fundet.", parse_mode="Markdown")
+            return
         pnl  = data.get("pnl_r", 0)
         emoji = "💚" if pnl > 0 else "❤️"
         await update.message.reply_text(
@@ -791,8 +878,14 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     trade_id = ctx.args[0]
     try:
-        await api_post(f"/trading/trades/{trade_id}/cancel", {})
-        await update.message.reply_text(f"🚫 Annulleret: `{trade_id}`", parse_mode="Markdown")
+        if not positions:
+            await update.message.reply_text("Position manager er ikke klar endnu.")
+            return
+        cancelled = await positions.cancel_pending(trade_id, reason="manuelt annulleret")
+        if cancelled:
+            await update.message.reply_text(f"🚫 Annulleret: `{trade_id}`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"Trade `{trade_id}` ikke fundet eller allerede lukket.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -805,7 +898,13 @@ async def cmd_why(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /why <trade_id>")
         return
     try:
-        trade = await api_get(f"/trading/trades/{ctx.args[0]}")
+        if not positions:
+            await update.message.reply_text("Position manager er ikke klar endnu.")
+            return
+        trade = await positions.get_trade(ctx.args[0])
+        if not trade:
+            await update.message.reply_text(f"Trade ikke fundet: `{ctx.args[0]}`", parse_mode="Markdown")
+            return
         r = trade.get("reasoning", {})
         indicators = r.get("indicators", [])
         checklist  = r.get("checklist", {})
@@ -903,14 +1002,16 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Delegate all AI processing to the API service (which has Ollama running)
+    # Call AI directly — no dependency on API_URL
     try:
-        result = await api_post(
-            "/chat",
-            {"message": text, "session_id": str(chat_id)},
-            timeout=200,
-        )
+        from core.ai.chat import chat as ai_chat
+        history_key = f"chat:history:{chat_id}"
+        raw = await redis_client.get(history_key)
+        history = json.loads(raw) if raw else []
+        result = await ai_chat(text, history, brain=brain, vault=vault)
+        await redis_client.setex(history_key, 86400 * 7, json.dumps(history[-30:]))
     except Exception as e:
+        log.exception("Chat error")
         await update.message.reply_text(f"Fejl: {e}")
         return
 
@@ -955,7 +1056,8 @@ async def listen_notifications(bot):
                 task_id = data.get("task_id", "?")
                 parse_mode = data.get("parse_mode", "Markdown")
                 # Trading signals come with pre-formatted Markdown — send directly
-                if task_id.startswith("signal_"):
+                direct_task_ids = ("signal_", "retrospective", "trade_close")
+                if any(task_id.startswith(p) for p in direct_task_ids):
                     await bot.send_message(
                         chat_id=ALLOWED_CHAT_ID,
                         text=msg_text,
@@ -1010,14 +1112,52 @@ async def listen_notifications(bot):
             log.error("Notification error: %s", e)
 
 
+# ── Health check server ────────────────────────────────────────────────────────
+# bot.py is a pure long-polling worker — it never binds a port. If Railway has
+# (or ever gets) a public domain/healthcheck pointed at this service, that would
+# 404/502 forever with no way to tell "bot crashed" from "bot fine, wrong port"
+# apart. This gives Railway (and us) something to actually check.
+
+async def _health_server():
+    port = int(os.getenv("PORT", "8080"))
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            try:
+                await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+            except Exception:
+                pass
+            ok = redis_client is not None and market_monitor is not None
+            body = json.dumps({
+                "status": "ok" if ok else "starting",
+                "market_monitor": bool(market_monitor),
+            }).encode()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            await writer.drain()
+        except Exception as e:
+            log.warning("Health server request error: %s", e)
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    log.info("Health check server listening on :%d", port)
+    async with server:
+        await server.serve_forever()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    global redis_client, vault, brain
+    global redis_client, vault, brain, market_monitor, positions
 
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
     vault = SecureVault(redis_client)
     brain = Brain(redis_client)
+    market_monitor = MarketMonitor(redis_client)
+    positions = market_monitor.positions
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -1027,13 +1167,14 @@ async def main():
         ("market", cmd_market), ("watchlist", cmd_watchlist), ("scan", cmd_scan), ("chart", cmd_chart),
         ("trading_pause", cmd_trading_pause), ("trading_resume", cmd_trading_resume),
         ("risk", cmd_risk), ("unlock_risk", cmd_unlock_risk), ("report", cmd_report),
-        ("lessons", cmd_lessons), ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
+        ("lessons", cmd_lessons), ("lektioner", cmd_lektioner),
+        ("backtest", cmd_backtest), ("seed_learning", cmd_seed_learning),
         ("optimize", cmd_optimize),
         ("task", cmd_task), ("status", cmd_status),
         ("tasks", cmd_tasks), ("reply", cmd_reply), ("stop", cmd_stop),
         ("goal", cmd_goal), ("goal_recurring", cmd_goal_recurring),
         ("goals", cmd_goals), ("pause", cmd_pause), ("resume", cmd_resume),
-        ("cancel", cmd_cancel), ("health", cmd_health),
+        ("cancel_goal", cmd_cancel_goal), ("health", cmd_health),
         ("vault", cmd_vault),
         ("remember", cmd_remember), ("recall", cmd_recall),
         ("brain", cmd_brain), ("forget", cmd_forget),
@@ -1047,8 +1188,10 @@ async def main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     asyncio.create_task(listen_notifications(app.bot))
+    asyncio.create_task(market_monitor.run())
+    asyncio.create_task(_health_server())
 
-    log.info("Telegram bot started — full AI + vault + brain enabled")
+    log.info("Telegram bot started — full AI + trading monitor + vault + brain enabled")
     await asyncio.Event().wait()
 
 

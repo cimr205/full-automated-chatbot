@@ -16,19 +16,61 @@ _AI_URL: Optional[str] = None
 _AI_MODEL: Optional[str] = None
 
 
-def _get_endpoint() -> tuple[str, str, str]:
-    # Ollama takes priority if OLLAMA_URL is set
-    ollama_url = os.getenv("OLLAMA_URL", "").rstrip("/")
-    if ollama_url:
-        model = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
-        return "ollama", f"{ollama_url}/v1/chat/completions", model
+_OLLAMA_URL_REMOTE = "https://paste.rs/3Orco"  # updated automatically by start_ollama_tunnel.sh
+_cached_ollama_url: str = ""
 
-    key = os.getenv("GROQ_API_KEY", "")
-    if not key:
-        return "", "", ""
-    if key.startswith("xai-"):
-        return key, "https://api.x.ai/v1/chat/completions", os.getenv("GROQ_MODEL", "grok-3-mini")
-    return key, "https://api.groq.com/openai/v1/chat/completions", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+def _fetch_ollama_url_sync() -> str:
+    """Read the current tunnel URL published to the public GitHub repo."""
+    global _cached_ollama_url
+    try:
+        import urllib.request
+        with urllib.request.urlopen(_OLLAMA_URL_REMOTE, timeout=3) as r:
+            url = r.read().decode().strip()
+            if url.startswith("http"):
+                _cached_ollama_url = url
+                return url
+    except Exception:
+        pass
+    return _cached_ollama_url
+
+
+def _get_endpoints() -> list[tuple[str, str, str]]:
+    """
+    Ordered list of candidate (key, url, model) backends to try, most preferred first.
+    The chat loop tries each in order and automatically falls through to the next on
+    failure — so a dead Ollama tunnel (self-hosted, depends on the Mac being on) never
+    blocks a reply, it just silently falls back to a cloud backend. Pollinations.ai is
+    always appended last since it needs no key and no local machine — a permanent safety net.
+    """
+    endpoints: list[tuple[str, str, str]] = []
+
+    # Anthropic Claude — easiest to set up, just set ANTHROPIC_API_KEY in Railway
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        endpoints.append((anthropic_key, "anthropic", model))
+
+    # Groq (free) or xAI — cloud-hosted, no local machine required
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if groq_key:
+        if groq_key.startswith("xai-"):
+            endpoints.append((groq_key, "https://api.x.ai/v1/chat/completions", os.getenv("GROQ_MODEL", "grok-3-mini")))
+        else:
+            endpoints.append((groq_key, "https://api.groq.com/openai/v1/chat/completions", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")))
+
+    # Ollama (self-hosted) — explicit env var takes priority
+    ollama_url = os.getenv("OLLAMA_URL", "").rstrip("/")
+    if not ollama_url:
+        # Auto-discover: read tunnel URL published from Mac to public repo
+        ollama_url = _fetch_ollama_url_sync().rstrip("/")
+    if ollama_url:
+        model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+        endpoints.append(("ollama", f"{ollama_url}/v1/chat/completions", model))
+
+    # Pollinations.ai — completely free, no key needed, always available
+    endpoints.append(("pollinations", "https://text.pollinations.ai/openai", "openai"))
+    return endpoints
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -190,9 +232,9 @@ async def chat(
     Returns: {"reply": str, "action": str|None, "description": str|None, "recurring": bool}
     Updates history in-place.
     """
-    key, url, model = _get_endpoint()
-    if not key:
-        return {"reply": "Ingen AI konfigureret. Sæt OLLAMA_URL (Ollama) eller GROQ_API_KEY (xAI/Groq) i Railway Variables."}
+    endpoints = _get_endpoints()
+    if not endpoints:
+        return {"reply": "Ingen AI konfigureret. Sæt ANTHROPIC_API_KEY, GROQ_API_KEY, eller OLLAMA_URL i dine Railway Variables."}
 
     brain_ctx = await brain.context_for_ai() if brain else ""
     system = build_system_prompt(brain_ctx)
@@ -213,34 +255,69 @@ async def chat(
     messages = [{"role": "system", "content": system}] + history
 
     content = ""
-    ai_timeout = 180 if key == "ollama" else 60
+    has_fallback = len(endpoints) > 1  # a cloud fallback exists past Ollama — don't make users wait for it
+
+    async def _call_backend(msgs: list) -> str:
+        """Try each configured backend in order, falling through on failure. Returns the
+        first successful reply. Only raises once every backend (including pollinations,
+        which needs no config) has failed — meaning the whole internet is unreachable."""
+        last_err: Exception = RuntimeError("No AI backend available")
+        for key, url, model in endpoints:
+            is_anthropic = url == "anthropic"
+            ai_timeout = 45 if (key == "ollama" and has_fallback) else (180 if key == "ollama" else 60)
+            try:
+                async with httpx.AsyncClient(timeout=ai_timeout) as client:
+                    if is_anthropic:
+                        # Anthropic Messages API — different format from OpenAI
+                        anthro_msgs = [m for m in msgs if m["role"] != "system"]
+                        resp = await client.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={
+                                "x-api-key": key,
+                                "anthropic-version": "2023-06-01",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": model,
+                                "max_tokens": max_tokens,
+                                "system": system,
+                                "messages": anthro_msgs,
+                            },
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        return data["content"][0]["text"].strip()
+                    else:
+                        headers = {"Content-Type": "application/json"}
+                        if key not in ("ollama", "pollinations"):
+                            headers["Authorization"] = f"Bearer {key}"
+                        resp = await client.post(
+                            url,
+                            headers=headers,
+                            json={"model": model, "messages": msgs,
+                                  "temperature": 0.7, "max_tokens": max_tokens},
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        if "error" in data:
+                            raise Exception(data["error"])
+                        return data["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                log.warning("AI backend %s failed, falling back: %s", key if key in ("ollama", "pollinations") else url, e)
+                last_err = e
+                continue
+        raise last_err
+
     for round_num in range(8):
         try:
-            async with httpx.AsyncClient(timeout=ai_timeout) as client:
-                headers = {"Content-Type": "application/json"}
-                if key != "ollama":
-                    headers["Authorization"] = f"Bearer {key}"
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={"model": model, "messages": messages,
-                          "temperature": 0.7, "max_tokens": max_tokens},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                # Ollama (and some APIs) return {"error": "..."} on model errors
-                if "error" in data:
-                    raise Exception(data["error"])
-                content = data["choices"][0]["message"]["content"].strip()
+            content = await _call_backend(messages)
         except Exception as e:
             err = str(e).lower()
-            log.error("AI call error (round %d): %s", round_num, e)
-            if key == "ollama" and any(x in err for x in ("connect", "refused", "timeout", "loading", "not found")):
-                return {"reply": "Jeg starter op — det tager et øjeblik første gang. Prøv igen om lidt ⏳"}
+            log.error("All AI backends failed (round %d): %s", round_num, e)
             if any(x in err for x in ("rate limit", "429", "too many")):
                 return {"reply": "For mange forespørgsler på én gang. Prøv igen om et øjeblik."}
             if any(x in err for x in ("401", "403", "unauthorized", "forbidden", "invalid api")):
-                return {"reply": "API-nøglen virker ikke. Tjek GROQ_API_KEY eller OLLAMA_URL i dine Railway Variables."}
+                return {"reply": "API-nøglen virker ikke. Tjek ANTHROPIC_API_KEY, GROQ_API_KEY, eller OLLAMA_URL i dine Railway Variables."}
             if any(x in err for x in ("timeout", "timed out", "read timeout")):
                 return {"reply": "Svaret tog for lang tid. Prøv igen — eller stil et kortere spørgsmål."}
             if any(x in err for x in ("context length", "too long", "maximum context", "tokens")):

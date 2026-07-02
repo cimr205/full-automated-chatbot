@@ -78,7 +78,8 @@ class MT5Bridge:
                             log.error("MT5 close failed: %s", result.get("error"))
 
                     elif command in ("get_account_info", "get_symbol_info", "get_tick",
-                                     "check_pending", "cancel_pending", "get_rates"):
+                                     "check_pending", "cancel_pending", "get_rates",
+                                     "modify_trade", "get_open_positions"):
                         trade_id = data.get("trade_id")
                         result   = data.get("result", {})
                         if trade_id and trade_id in self._pending:
@@ -218,6 +219,44 @@ class MT5Bridge:
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             return {"error": "timeout — er MT5 Worker kørende på din PC?"}
+
+    async def modify_trade(self, trade_id: str, symbol: str, new_sl: float, new_tp: float) -> dict:
+        """Update SL/TP on an already-open position (e.g. auto-move to breakeven)."""
+        ticket_raw = await self._redis.hget("trading:mt5:tickets", trade_id)
+        if not ticket_raw:
+            return {"error": "Ingen MT5 ticket fundet for denne trade"}
+        ticket_data = json.loads(ticket_raw)
+
+        req_id = f"mod_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "modify_trade", "trade_id": req_id, "symbol": symbol,
+               "ticket": ticket_data.get("ticket"), "new_sl": new_sl, "new_tp": new_tp,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=15)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout"}
+
+    async def get_open_positions(self) -> dict:
+        """All positions currently open on MT5 — used to reconcile against Redis."""
+        req_id = f"pos_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "get_open_positions", "trade_id": req_id,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=15)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout"}
 
     async def get_tick(self, symbol: str) -> dict:
         """Current bid/ask for a symbol — used to monitor open positions."""

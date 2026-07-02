@@ -18,11 +18,13 @@ Xvfb :99 -screen 0 1024x768x16 &
 XVFB_PID=$!
 sleep 2
 
-# VNC so you can see the MT5 terminal and click "AutoTrading" ON once —
-# that toggle is a one-time GUI setting inside MT5 itself, not something
-# any command-line flag or .ini edit reliably controls. Without a password
-# set, x11vnc runs open — set VNC_PASSWORD in Railway and add a TCP proxy
-# (Settings → Networking → TCP Proxy → port 5900) to reach it.
+# VNC kept as a diagnostic fallback — AutoTrading is now enabled at launch
+# via the /config: ini below (see MT5_CONFIG_INI), so manual clicking
+# shouldn't be needed. If MT5 still rejects orders with "AutoTrading
+# disabled by client", connect via VNC to see what the terminal is actually
+# doing. Without a password set, x11vnc runs open — set VNC_PASSWORD in
+# Railway and add a TCP proxy (Settings → Networking → TCP Proxy → port
+# 5900) to reach it.
 if [ -n "${VNC_PASSWORD:-}" ]; then
   x11vnc -display :99 -forever -shared -passwd "$VNC_PASSWORD" -rfbport 5900 &
 else
@@ -81,16 +83,59 @@ if [ -z "$WINE_PYTHON" ]; then
 fi
 
 # Launch the MT5 terminal itself visibly (not just lazily via mt5.initialize()
-# inside a trade command) so it's there, logged in, and clickable over VNC
-# right away. Auto-login uses MT5_LOGIN/MT5_PASSWORD/MT5_SERVER if set.
+# inside a trade command) so it's there, logged in, and ready right away.
+#
+# AutoTrading ("Algo Trading" toggle) is a global flag the terminal reads
+# from a /config: ini file at startup — it does NOT need to be clicked by
+# hand in the GUI. This is the same mechanism MT5 strategy-tester farms use
+# to run headless. [Experts] Enabled=true is the AutoTrading button itself;
+# AllowLiveTrading/AllowDllImport are the per-EA permissions an EA would
+# otherwise need granted via its own Properties dialog.
 MT5_EXE="$(find "$WINEPREFIX" -iname 'terminal64.exe' 2>/dev/null | head -1)"
 if [ -n "$MT5_EXE" ]; then
-  if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ] && [ -n "${MT5_SERVER:-}" ]; then
-    wine "$MT5_EXE" "/login:${MT5_LOGIN}" "/password:${MT5_PASSWORD}" "/server:${MT5_SERVER}" &
+  MT5_CONFIG_INI="/tmp/mt5_startup.ini"
+  # MT5 ini files use 1/0, not true/false — "true" is silently ignored and
+  # leaves AutoTrading off, which produces error 10027 on every order_send.
+  {
+    echo "[Common]"
+    if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ] && [ -n "${MT5_SERVER:-}" ]; then
+      echo "Login=${MT5_LOGIN}"
+      echo "Password=${MT5_PASSWORD}"
+      echo "Server=${MT5_SERVER}"
+    fi
+    echo "AutoConfiguration=false"
+    echo ""
+    echo "[Experts]"
+    echo "AllowLiveTrading=1"
+    echo "AllowDllImport=1"
+    echo "AllowImport=1"
+    echo "Enabled=1"
+    echo "Account=ALL"
+    echo "Confirm=0"
+  } > "$MT5_CONFIG_INI"
+
+  # Use hardcoded Z: path — winepath can fail silently if wineserver isn't
+  # fully up yet, which would give MT5 a malformed /config: argument.
+  wine "$MT5_EXE" "/config:Z:\\tmp\\mt5_startup.ini" &
+  MT5_PID=$!
+
+  # Belt-and-suspenders: after MT5 has had time to create its data directory,
+  # patch the persisted terminal.ini directly so AutoTrading survives restarts
+  # even if the /config: flag is ignored by this MT5 build/broker combo.
+  sleep 20
+  TERMINAL_INI=$(find "$WINEPREFIX/drive_c" -name "terminal.ini" 2>/dev/null | head -1)
+  if [ -n "$TERMINAL_INI" ]; then
+    echo "Patcher terminal.ini for AutoTrading: $TERMINAL_INI"
+    if grep -q "^\[Experts\]" "$TERMINAL_INI"; then
+      sed -i '/^\[Experts\]/,/^\[/{s/^Enabled=.*/Enabled=1/}' "$TERMINAL_INI"
+      grep -q "^Enabled=" "$TERMINAL_INI" || sed -i '/^\[Experts\]/a Enabled=1' "$TERMINAL_INI"
+      sed -i '/^\[Experts\]/,/^\[/{s/^AllowLiveTrading=.*/AllowLiveTrading=1/}' "$TERMINAL_INI"
+    else
+      printf '\n[Experts]\nEnabled=1\nAllowLiveTrading=1\nAllowDllImport=1\nAllowImport=1\n' >> "$TERMINAL_INI"
+    fi
   else
-    wine "$MT5_EXE" &
+    echo "ADVARSEL: terminal.ini ikke fundet endnu — /config: er eneste forsøg."
   fi
-  sleep 10
 fi
 
 wine "$WINE_PYTHON" -m mt5linux --host 0.0.0.0 -p "${MT5_LINUX_PORT:-18812}" &
