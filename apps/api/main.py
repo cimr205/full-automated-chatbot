@@ -574,7 +574,9 @@ async def get_lessons():
 
 @app.get("/trading/backtest")
 async def backtest_symbol(symbol: str = "EURUSD=X"):
-    return await trading_backtest.run_backtest(symbol)
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    return await trading_backtest.run_backtest(market_monitor.mt5, symbol)
 
 
 @app.post("/trading/optimize")
@@ -587,7 +589,7 @@ async def trigger_optimize():
 
 async def _run_optimize_and_notify():
     try:
-        result = await trading_optimize.run_sweep()
+        result = await trading_optimize.run_sweep(market_monitor.mt5)
         lines = [
             f"🧪 *Parameter-optimering færdig*\n"
             f"{result['combinations_tested']} kombinationer testet på "
@@ -611,11 +613,15 @@ async def _run_optimize_and_notify():
 
 @app.post("/trading/seed-learning")
 async def seed_learning():
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
     forex_raw  = await redis_client.get("trading:watchlist:forex")
     stocks_raw = await redis_client.get("trading:watchlist:stocks")
     symbols = (forex_raw.split(",") if forex_raw else DEFAULT_FOREX) + \
               (stocks_raw.split(",") if stocks_raw else DEFAULT_STOCKS)
-    seeded = await trading_backtest.seed_learning(redis_client, [s.strip() for s in symbols if s.strip()])
+    seeded = await trading_backtest.seed_learning(
+        redis_client, market_monitor.mt5, [s.strip() for s in symbols if s.strip()]
+    )
     return {"status": "seeded", "results": seeded}
 
 

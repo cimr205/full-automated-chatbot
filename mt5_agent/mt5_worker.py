@@ -280,6 +280,61 @@ def mt5_get_symbol_info(symbol: str) -> dict:
     }
 
 
+def mt5_get_tick(symbol: str) -> dict:
+    """Current bid/ask — used to monitor open positions for SL/TP/partial
+    hits (replaces the same broken Yahoo Finance polling as mt5_get_rates)."""
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        mt5.shutdown()
+        return {"error": f"Symbol {symbol} ikke fundet"}
+    if not info.visible:
+        mt5.symbol_select(symbol, True)
+
+    tick = mt5.symbol_info_tick(symbol)
+    mt5.shutdown()
+    if tick is None:
+        return {"error": f"Ingen tick data for {symbol}"}
+    return {"bid": tick.bid, "ask": tick.ask}
+
+
+def mt5_get_rates(symbol: str, timeframe: str, count: int) -> dict:
+    """Historical OHLCV straight from the broker — replaces Yahoo Finance,
+    which blocks/rate-limits cloud datacenter IPs (Railway included) and
+    made the scanner silently starve of data on every symbol."""
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    tf_map = {"1h": mt5.TIMEFRAME_H1, "4h": mt5.TIMEFRAME_H4, "1d": mt5.TIMEFRAME_D1}
+    mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_H1)
+
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        mt5.shutdown()
+        return {"error": f"Symbol {symbol} ikke fundet. Tjek SYMBOL_MAP i mt5_worker.py"}
+    if not info.visible:
+        mt5.symbol_select(symbol, True)
+
+    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
+    mt5.shutdown()
+    if rates is None or len(rates) == 0:
+        return {"error": f"Ingen historik for {symbol}/{timeframe} — "
+                          f"terminalen har muligvis ikke synkroniseret den endnu"}
+
+    ohlcv = [
+        [int(r["time"]) * 1000, float(r["open"]), float(r["high"]),
+         float(r["low"]), float(r["close"]), float(r["tick_volume"])]
+        for r in rates
+    ]
+    return {"ohlcv": ohlcv}
+
+
 def mt5_close_trade(ticket: int, symbol: str, direction: str, volume: float) -> dict:
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
@@ -415,6 +470,32 @@ async def handle_command(cmd: dict, redis: aioredis.Redis):
         }
         if "error" in result:
             log.error("symbol_info fejlede for %s: %s", symbol, result["error"])
+
+    elif command == "get_tick":
+        result  = mt5_get_tick(symbol)
+        payload = {
+            "trade_id": trade_id,
+            "command":  "get_tick",
+            "symbol":   symbol,
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+        if "error" in result:
+            log.error("get_tick fejlede for %s: %s", symbol, result["error"])
+
+    elif command == "get_rates":
+        timeframe = cmd.get("timeframe", "1h")
+        count     = int(cmd.get("count", 300))
+        result  = mt5_get_rates(symbol, timeframe, count)
+        payload = {
+            "trade_id": trade_id,
+            "command":  "get_rates",
+            "symbol":   symbol,
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+        if "error" in result:
+            log.error("get_rates fejlede for %s/%s: %s", symbol, timeframe, result["error"])
 
     else:
         return

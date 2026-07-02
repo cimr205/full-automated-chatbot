@@ -10,7 +10,6 @@ import os
 import uuid
 from datetime import datetime, timezone, time as dtime
 
-import httpx
 import redis.asyncio as aioredis
 
 from .signal_engine import score_signal
@@ -54,15 +53,12 @@ SYMBOL_OVERRIDES = {
     "GC=F": {"atr_sl_mult": 0.75},
 }
 
-# Yahoo Finance interval mapping: (1h, 4h, 1d)
-_YF_INTERVAL = {
-    "1h": "1h",
-    "4h": "1h",   # YF has no 4h; we resample 1h → 4h
-    "1d": "1d",
-}
-_YF_PERIOD = {
-    "1h": "60d",
-    "1d": "2y",
+# Candle counts requested from MT5 per timeframe (4h is resampled from 1h,
+# not fetched directly — MT5's own H4 timeframe starts its bars at different
+# clock boundaries than a clean 4x-H1 grouping).
+_RATES_COUNT = {
+    "1h": 1000,
+    "1d": 500,
 }
 
 
@@ -72,8 +68,8 @@ class MarketMonitor:
         self._running  = False
         self._last_signal: dict[str, dict] = {}
         self._last_snapshot: dict[str, dict] = {}   # for the per-cycle watchlist chart
-        self.positions = PositionManager(redis)
         self.mt5       = MT5Bridge(redis)
+        self.positions = PositionManager(redis, mt5_bridge=self.mt5)
         self.risk      = RiskManager(redis, db=db)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -299,51 +295,18 @@ class MarketMonitor:
     # ── Data fetching ─────────────────────────────────────────────────────────
 
     async def _fetch(self, symbol: str, timeframe: str) -> list | None:
-        period   = _YF_PERIOD.get(timeframe, "60d")
-        interval = _YF_INTERVAL.get(timeframe, "1h")
-        url = (
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            f"?interval={interval}&range={period}&includePrePost=false"
-        )
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept":     "application/json",
-        }
+        """Historical OHLCV straight from the broker via the MT5 Worker —
+        Yahoo Finance blocked/rate-limited Railway's outbound IP (confirmed
+        via 404s on every request), which silently starved every symbol of
+        data and meant the scanner never found a signal to act on."""
+        count = _RATES_COUNT.get(timeframe, 500)
         try:
-            async with httpx.AsyncClient(timeout=20, headers=headers) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-
-            result = data.get("chart", {}).get("result", [])
-            if not result:
+            result = await self.mt5.get_rates(symbol, timeframe, count)
+            if "error" in result:
+                log.warning("[%s] MT5 get_rates %s error: %s", symbol, timeframe, result["error"])
                 return None
-            r         = result[0]
-            timestamps = r.get("timestamp", [])
-            q          = r.get("indicators", {}).get("quote", [{}])[0]
-            opens      = q.get("open",   [])
-            highs      = q.get("high",   [])
-            lows       = q.get("low",    [])
-            closes     = q.get("close",  [])
-            volumes    = q.get("volume", [])
-
-            ohlcv = []
-            for i, ts in enumerate(timestamps):
-                try:
-                    c = closes[i]
-                    if c is None:
-                        continue
-                    ohlcv.append([
-                        ts * 1000,
-                        opens[i]   or c,
-                        highs[i]   or c,
-                        lows[i]    or c,
-                        c,
-                        volumes[i] or 0,
-                    ])
-                except (IndexError, TypeError):
-                    continue
-            return ohlcv if len(ohlcv) >= 10 else None
+            ohlcv = result.get("ohlcv")
+            return ohlcv if ohlcv and len(ohlcv) >= 10 else None
         except Exception as e:
             log.warning("[%s] fetch %s error: %s", symbol, timeframe, e)
             return None

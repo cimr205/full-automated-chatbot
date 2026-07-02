@@ -23,8 +23,9 @@ MONITOR_INTERVAL = 60                          # seconds between price checks
 
 
 class PositionManager:
-    def __init__(self, redis: aioredis.Redis):
+    def __init__(self, redis: aioredis.Redis, mt5_bridge=None):
         self._redis   = redis
+        self._mt5     = mt5_bridge
         self._running = False
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -214,23 +215,17 @@ class PositionManager:
                 log.warning("[%s] position check: %s", symbol, e)
 
     async def _get_current_price(self, symbol: str) -> float | None:
-        import httpx
-        url = (
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            f"?interval=1m&range=5m&includePrePost=false"
-        )
+        """Current price via MT5 (bid/ask midpoint) — replaces Yahoo Finance,
+        which blocks/rate-limits Railway's outbound IP. The broker enforces
+        the real SL/TP on its own regardless of this check; this just drives
+        Telegram close-notifications, partial-TP reminders, and learning."""
+        if self._mt5 is None:
+            return None
         try:
-            async with httpx.AsyncClient(timeout=10,
-                                          headers={"User-Agent": "Mozilla/5.0"}) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-            result  = data.get("chart", {}).get("result", [])
-            if not result:
+            tick = await self._mt5.get_tick(symbol)
+            if "error" in tick:
                 return None
-            closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-            closes = [c for c in closes if c is not None]
-            return closes[-1] if closes else None
+            return (tick["bid"] + tick["ask"]) / 2
         except Exception:
             return None
 

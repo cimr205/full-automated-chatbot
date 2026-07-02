@@ -77,8 +77,8 @@ class MT5Bridge:
                         else:
                             log.error("MT5 close failed: %s", result.get("error"))
 
-                    elif command in ("get_account_info", "get_symbol_info",
-                                     "check_pending", "cancel_pending"):
+                    elif command in ("get_account_info", "get_symbol_info", "get_tick",
+                                     "check_pending", "cancel_pending", "get_rates"):
                         trade_id = data.get("trade_id")
                         result   = data.get("result", {})
                         if trade_id and trade_id in self._pending:
@@ -215,6 +215,41 @@ class MT5Bridge:
 
         try:
             return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout — er MT5 Worker kørende på din PC?"}
+
+    async def get_tick(self, symbol: str) -> dict:
+        """Current bid/ask for a symbol — used to monitor open positions."""
+        req_id = f"tck_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "get_tick", "trade_id": req_id, "symbol": symbol,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout"}
+
+    async def get_rates(self, symbol: str, timeframe: str = "1h", count: int = 300) -> dict:
+        """Historical OHLCV candles straight from the broker via MT5 —
+        used instead of Yahoo Finance, which blocks/rate-limits Railway's
+        outbound IP and starved the scanner of data on every symbol."""
+        req_id = f"rts_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "get_rates", "trade_id": req_id, "symbol": symbol,
+               "timeframe": timeframe, "count": count,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=30)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             return {"error": "timeout — er MT5 Worker kørende på din PC?"}

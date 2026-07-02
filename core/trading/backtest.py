@@ -9,14 +9,14 @@ real historical outcomes, so a fresh account doesn't have to lose 5 live
 trades on a bad setup before the bot learns to stop using it.
 
 Run standalone:  python -m core.trading.backtest EURUSD=X
+(needs REDIS_URL set and the MT5 Worker connected — history now comes
+straight from the broker via MT5, not Yahoo Finance; see fetch_history.)
 """
 import asyncio
 import json
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
-
-import httpx
 
 from .market_monitor import _resample_4h, CONFIDENCE_THRESH
 from .signal_engine import score_signal
@@ -25,34 +25,13 @@ WINDOW   = 200   # candles fed to score_signal at each step (matches live ~200-c
 MAX_HOLD = 200   # max candles to hold a simulated trade before giving up (counted as "no exit")
 
 
-async def fetch_history(symbol: str, interval: str = "1h", range_: str = "730d") -> list:
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        f"?interval={interval}&range={range_}&includePrePost=false"
-    )
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    async with httpx.AsyncClient(timeout=20, headers=headers) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-
-    result = data.get("chart", {}).get("result", [])
-    if not result:
+async def fetch_history(mt5_bridge, symbol: str, timeframe: str = "1h", count: int = 5000) -> list:
+    """Historical OHLCV via the MT5 Worker (broker's own history) — replaces
+    Yahoo Finance, which blocks/rate-limits Railway's outbound IP."""
+    result = await mt5_bridge.get_rates(symbol, timeframe, count)
+    if "error" in result:
         return []
-    r = result[0]
-    timestamps = r.get("timestamp", [])
-    q = r.get("indicators", {}).get("quote", [{}])[0]
-    ohlcv = []
-    for i, ts in enumerate(timestamps):
-        try:
-            c = q["close"][i]
-            if c is None:
-                continue
-            ohlcv.append([ts * 1000, q["open"][i] or c, q["high"][i] or c,
-                          q["low"][i] or c, c, q["volume"][i] or 0])
-        except (IndexError, TypeError):
-            continue
-    return ohlcv
+    return result.get("ohlcv") or []
 
 
 def _pnl_r(direction: str, entry: float, exit_price: float, risk: float) -> float:
@@ -131,15 +110,16 @@ def simulate(ohlcv: list, confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
     }
 
 
-async def run_backtest(symbol: str, range_: str = "730d", confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
-    ohlcv = await fetch_history(symbol, "1h", range_)
+async def run_backtest(mt5_bridge, symbol: str, count: int = 5000,
+                       confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
+    ohlcv = await fetch_history(mt5_bridge, symbol, "1h", count)
     if len(ohlcv) < WINDOW + 10:
-        return {"error": f"Ikke nok historik for {symbol} ({len(ohlcv)} candles)"}
+        return {"error": f"Ikke nok historik for {symbol} ({len(ohlcv)} candles) — er MT5 Worker online?"}
     result = simulate(ohlcv, confidence_thresh=confidence_thresh)
     return {"symbol": symbol, "candles": len(ohlcv), **result}
 
 
-async def seed_learning(redis, symbols: list[str]) -> dict:
+async def seed_learning(redis, mt5_bridge, symbols: list[str]) -> dict:
     """
     Pre-seeds core/trading/learning.py's win/loss counters from backtest
     results, so a fresh deployment already knows which setups have a bad
@@ -149,7 +129,7 @@ async def seed_learning(redis, symbols: list[str]) -> dict:
     seeded = {}
     for symbol in symbols:
         try:
-            result = await run_backtest(symbol)
+            result = await run_backtest(mt5_bridge, symbol)
         except Exception:
             continue
         if "error" in result:
@@ -163,9 +143,28 @@ async def seed_learning(redis, symbols: list[str]) -> dict:
 
 
 def _cli():
-    symbol = sys.argv[1] if len(sys.argv) > 1 else "EURUSD=X"
-    result = asyncio.run(run_backtest(symbol))
-    print(json.dumps(result, indent=2))
+    import os
+    import redis.asyncio as aioredis
+    from .mt5_bridge import MT5Bridge
+
+    async def _run():
+        redis_url = os.environ.get("REDIS_URL")
+        if not redis_url:
+            print("FEJL: sæt REDIS_URL (samme som mt5_agent-servicen bruger).", file=sys.stderr)
+            sys.exit(1)
+        redis = aioredis.from_url(redis_url, decode_responses=True)
+        bridge = MT5Bridge(redis)
+        listen_task = asyncio.create_task(bridge.run())
+        try:
+            symbol = sys.argv[1] if len(sys.argv) > 1 else "EURUSD=X"
+            result = await run_backtest(bridge, symbol)
+            print(json.dumps(result, indent=2))
+        finally:
+            bridge.stop()
+            listen_task.cancel()
+            await redis.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

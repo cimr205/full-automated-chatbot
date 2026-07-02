@@ -40,12 +40,12 @@ CONFIDENCE_GRID = [0.60, 0.65, 0.68, 0.72]
 MIN_SAMPLE_SIZE = 15   # don't trust a win rate/expectancy computed from too few trades
 
 
-async def run_sweep(symbols: list = None, progress: bool = False) -> dict:
+async def run_sweep(mt5_bridge, symbols: list = None, progress: bool = False) -> dict:
     symbols = symbols or DEFAULT_SYMBOLS
     histories = {}
     for sym in symbols:
         try:
-            ohlcv = await fetch_history(sym, "1h", "730d")
+            ohlcv = await fetch_history(mt5_bridge, sym, "1h", 5000)
             if len(ohlcv) > 200:
                 histories[sym] = ohlcv
         except Exception:
@@ -104,8 +104,27 @@ async def run_sweep(symbols: list = None, progress: bool = False) -> dict:
 
 
 def _cli():
-    result = asyncio.run(run_sweep(progress=True))
-    print(json.dumps(result, indent=2))
+    import os
+    import redis.asyncio as aioredis
+    from .mt5_bridge import MT5Bridge
+
+    async def _run():
+        redis_url = os.environ.get("REDIS_URL")
+        if not redis_url:
+            print("FEJL: sæt REDIS_URL (samme som mt5_agent-servicen bruger).", file=sys.stderr)
+            sys.exit(1)
+        redis = aioredis.from_url(redis_url, decode_responses=True)
+        bridge = MT5Bridge(redis)
+        listen_task = asyncio.create_task(bridge.run())
+        try:
+            result = await run_sweep(bridge, progress=True)
+            print(json.dumps(result, indent=2))
+        finally:
+            bridge.stop()
+            listen_task.cancel()
+            await redis.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
