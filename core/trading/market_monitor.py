@@ -31,6 +31,7 @@ MONITOR_INTERVAL   = int(os.getenv("MONITOR_INTERVAL", "900"))    # 15 min — m
 CONFIDENCE_THRESH  = float(os.getenv("SIGNAL_CONFIDENCE", "0.72")) # raised: we only want the best
 SIGNAL_COOLDOWN    = int(os.getenv("SIGNAL_COOLDOWN", "86400"))    # 24h — one trade per day
 CONFIRM_BAND       = float(os.getenv("SIGNAL_CONFIRM_BAND", "0.07"))
+FIXED_LOT_SIZE     = float(os.getenv("TRADE_FIXED_LOT_SIZE", "0"))  # >0 = skip equity-based sizing, always use this lot
 PENDING_KEY_PREFIX = "trading:pending:"
 PENDING_TTL        = MONITOR_INTERVAL * 2
 DAILY_TRADE_CAP    = 1   # one perfect trade per day
@@ -746,6 +747,8 @@ class MarketMonitor:
 
     async def _sized_volume(self, symbol: str, entry: float, stop_loss: float) -> float | None:
         """Equity-based lot size using the broker's real contract/tick data. None = use bridge default."""
+        if FIXED_LOT_SIZE:
+            return FIXED_LOT_SIZE
         try:
             status = await self.risk.status()
             equity = status.get("equity") or 0

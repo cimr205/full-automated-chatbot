@@ -1188,8 +1188,13 @@ async def main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     asyncio.create_task(listen_notifications(app.bot))
-    asyncio.create_task(market_monitor.run())
     asyncio.create_task(_health_server())
+    # Note: the periodic auto-scan loop (market_monitor.run()) is NOT started here —
+    # it already runs in the api service. Running it here too would mean two
+    # independent 15-min scan loops racing against the same non-atomic daily-trade-cap
+    # check in Redis, risking a double-open on the same signal. This process only
+    # does on-demand scans (/scan → market_monitor._scan_all()) and relays the api
+    # service's trade/notification events via the shared Redis pub/sub channels.
 
     log.info("Telegram bot started — full AI + trading monitor + vault + brain enabled")
     await asyncio.Event().wait()
