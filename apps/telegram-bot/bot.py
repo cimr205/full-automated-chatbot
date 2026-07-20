@@ -1189,12 +1189,20 @@ async def main():
     await app.updater.start_polling(drop_pending_updates=True)
     asyncio.create_task(listen_notifications(app.bot))
     asyncio.create_task(_health_server())
-    # Note: the periodic auto-scan loop (market_monitor.run()) is NOT started here —
-    # it already runs in the api service. Running it here too would mean two
-    # independent 15-min scan loops racing against the same non-atomic daily-trade-cap
-    # check in Redis, risking a double-open on the same signal. This process only
-    # does on-demand scans (/scan → market_monitor._scan_all()) and relays the api
-    # service's trade/notification events via the shared Redis pub/sub channels.
+    # Start only the MT5 results listener — every MT5Bridge call (ping aside) creates
+    # a per-request future keyed in *this process's* self.mt5._pending and awaits it
+    # with a timeout; without a listener subscribed to trading:mt5:results in this
+    # process, that future never resolves and every command (get_account_info,
+    # get_rates, ...) just times out after 10s. That's why /scan silently did nothing.
+    #
+    # Deliberately NOT calling market_monitor.run() here — it also starts the
+    # periodic auto-scan loop, positions.run() (auto-breakeven), the pending-orders
+    # poller, and reconciliation, all of which already run in the api service.
+    # Starting those here too would duplicate mutating actions on live positions/
+    # trades from two processes at once. This process only does on-demand scans
+    # (/scan → market_monitor._scan_all()) and relays the api service's
+    # trade/notification events via the shared Redis pub/sub channels.
+    asyncio.create_task(market_monitor.mt5.run())
 
     log.info("Telegram bot started — full AI + trading monitor + vault + brain enabled")
     await asyncio.Event().wait()
