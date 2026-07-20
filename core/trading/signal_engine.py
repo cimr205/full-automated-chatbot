@@ -293,9 +293,11 @@ def score_signal(
     weights = [f[1] for f in frames]
 
     # All available timeframes must agree
-    dirs = [s["direction"] for s in scores if s["direction"] != "neutral"]
+    tf_directions = [s["direction"] for s in scores]
+    dirs = [d for d in tf_directions if d != "neutral"]
     if not dirs or len(set(dirs)) > 1:
-        return {**no_signal, "reasons": ["Blandede signaler på tværs af tidsrammer"]}
+        return {**no_signal, "reasons": [f"Blandede/neutrale signaler på tværs af tidsrammer {tf_directions}"],
+                "tf_directions": tf_directions}
 
     direction = dirs[0]
     total_w   = sum(weights)
