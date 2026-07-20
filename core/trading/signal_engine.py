@@ -291,15 +291,29 @@ def score_signal(
 
     scores  = [_score_timeframe(f[0]) for f in frames]
     weights = [f[1] for f in frames]
-
-    # All available timeframes must agree
     tf_directions = [s["direction"] for s in scores]
-    dirs = [d for d in tf_directions if d != "neutral"]
-    if not dirs or len(set(dirs)) > 1:
-        return {**no_signal, "reasons": [f"Blandede/neutrale signaler på tværs af tidsrammer {tf_directions}"],
+
+    # Direction comes from the higher timeframes (4h/1d = the trend/bias frames,
+    # weighted 1.5/2.0) when we have them. 1h is the entry-timing frame and is
+    # deliberately NOT required to agree — a 1h countertrend pullback into the
+    # HTF trend is exactly what the Trend Pullback setup below is built to catch.
+    # Previously requiring all three frames to agree meant every pullback entry
+    # got discarded here before setup detection ever ran, which is why the
+    # scanner sat at "neutral" through a real 0.5%+ intraday move (2026-07-20).
+    htf_scores = scores[1:]
+    htf_dirs   = [s["direction"] for s in htf_scores if s["direction"] != "neutral"]
+
+    if htf_scores:
+        if not htf_dirs or len(set(htf_dirs)) > 1:
+            return {**no_signal, "reasons": [f"Højere tidsrammer (4h/1d) uenige eller neutrale {tf_directions}"],
+                    "tf_directions": tf_directions}
+        direction = htf_dirs[0]
+    elif scores[0]["direction"] != "neutral":
+        direction = scores[0]["direction"]
+    else:
+        return {**no_signal, "reasons": [f"1h neutral og ingen højere tidsramme tilgængelig {tf_directions}"],
                 "tf_directions": tf_directions}
 
-    direction = dirs[0]
     total_w   = sum(weights)
     conf_sum  = sum(s["confidence"] * w for s, w in zip(scores, weights)
                     if s["direction"] == direction)
