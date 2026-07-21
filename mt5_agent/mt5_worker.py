@@ -132,10 +132,14 @@ def _pick_filling_mode(info) -> int:
     support FOK (or only RETURN, for exchange-traded instruments). Pick the first
     mode this symbol's filling_mode bitmask actually advertises support for.
     """
+    # MetaTrader5's Python module only exposes ORDER_FILLING_* constants (used when
+    # placing orders) — the SYMBOL_FILLING_* bitmask flags describing what a symbol
+    # supports aren't module attributes, so mt5.SYMBOL_FILLING_IOC/FOK don't exist.
+    # Values per MQL5's ENUM_SYMBOL_FILLING_MODE: FOK=1, IOC=2.
     mode = getattr(info, "filling_mode", 0)
-    if mode & mt5.SYMBOL_FILLING_IOC:
+    if mode & 2:
         return mt5.ORDER_FILLING_IOC
-    if mode & mt5.SYMBOL_FILLING_FOK:
+    if mode & 1:
         return mt5.ORDER_FILLING_FOK
     return mt5.ORDER_FILLING_RETURN
 
