@@ -33,6 +33,7 @@ SIGNAL_COOLDOWN    = int(os.getenv("SIGNAL_COOLDOWN", "86400"))    # 24h — one
 CONFIRM_BAND       = float(os.getenv("SIGNAL_CONFIRM_BAND", "0.07"))
 FIXED_LOT_SIZE     = float(os.getenv("TRADE_FIXED_LOT_SIZE", "0"))  # >0 = skip equity-based sizing, always use this lot
 PENDING_KEY_PREFIX = "trading:pending:"
+TUNED_KEY_PREFIX   = "trading:tuned_params:"   # written by core/trading/nightly_tune.py
 PENDING_TTL        = MONITOR_INTERVAL * 2
 DAILY_TRADE_CAP    = 1   # one perfect trade per day
 
@@ -194,7 +195,11 @@ class MarketMonitor:
         ohlcv_4h = _resample_4h(ohlcv_1h)
         ohlcv_1d = await self._fetch(symbol, "1d")
 
-        overrides = SYMBOL_OVERRIDES.get(symbol, {})
+        # Nightly-tuned params (from core/trading/nightly_tune.py) take precedence
+        # over the static SYMBOL_OVERRIDES table when present — they're refreshed
+        # against this account's own recent XAUUSD data, SYMBOL_OVERRIDES is a
+        # one-off 2026-06-24 sweep across a 5-symbol basket.
+        overrides = {**SYMBOL_OVERRIDES.get(symbol, {}), **await self._tuned_overrides(symbol)}
         signal = score_signal(
             ohlcv_1h, ohlcv_4h, ohlcv_1d,
             ohlcv_15m=ohlcv_15m,
@@ -233,8 +238,9 @@ class MarketMonitor:
             log.info("[%s] Checklist failed: %s", symbol, failed)
             return
 
-        if confidence < CONFIDENCE_THRESH:
-            log.debug("[%s] Confidence too low: %.0f%%", symbol, confidence * 100)
+        conf_thresh = overrides.get("confidence_thresh", CONFIDENCE_THRESH)
+        if confidence < conf_thresh:
+            log.debug("[%s] Confidence too low: %.0f%% (need %.0f%%)", symbol, confidence * 100, conf_thresh * 100)
             return
 
         # News filter — no trading 45 min around high-impact USD/Gold events
@@ -747,6 +753,24 @@ class MarketMonitor:
             ex=PENDING_TTL,
         )
         return False
+
+    async def _tuned_overrides(self, symbol: str) -> dict:
+        """Latest nightly parameter-sweep result for this symbol, if any (see
+        core/trading/nightly_tune.py). Empty dict if never tuned yet."""
+        try:
+            raw = await self._redis.hgetall(f"{TUNED_KEY_PREFIX}{symbol}")
+        except Exception as e:
+            log.warning("[%s] tuned-params lookup failed: %s", symbol, e)
+            return {}
+        if not raw:
+            return {}
+        out = {}
+        for k in ("min_confluence", "atr_sl_mult", "atr_tp_mult", "min_rr", "confidence_thresh"):
+            if k in raw:
+                out[k] = float(raw[k])
+        if "min_confluence" in out:
+            out["min_confluence"] = int(out["min_confluence"])
+        return out
 
     async def _sized_volume(self, symbol: str, entry: float, stop_loss: float) -> float | None:
         """Equity-based lot size using the broker's real contract/tick data. None = use bridge default."""
