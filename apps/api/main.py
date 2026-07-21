@@ -572,37 +572,6 @@ async def get_lessons():
     return await trading_learning.all_stats(redis_client)
 
 
-# ── TEMPORARY: one-off pipeline smoke test, remove after use ──────────────────
-# Confirms MT5 order execution actually works end-to-end (Redis command ->
-# mt5-agent -> real MT5 terminal -> ticket back), independent of whether the
-# signal engine currently has a qualifying setup. Minimum lot, tight stop.
-@app.post("/trading/_smoke_test_open")
-async def _smoke_test_open():
-    if not market_monitor:
-        raise HTTPException(503, "Market monitor not running")
-    tick = await market_monitor.mt5.get_tick("XAUUSD")
-    if "error" in tick or not tick.get("bid"):
-        return {"step": "get_tick", "result": tick}
-    price = tick["bid"]
-    sl = round(price - 3, 2)
-    tp = round(price + 6, 2)
-    result = await market_monitor.mt5.send_open(
-        trade_id="smoke_test_1", symbol="XAUUSD", direction="long",
-        stop_loss=sl, take_profit=tp, volume=0.01, order_type="market",
-    )
-    return {"step": "send_open", "price": price, "sl": sl, "tp": tp, "result": result}
-
-
-@app.post("/trading/_smoke_test_close")
-async def _smoke_test_close():
-    if not market_monitor:
-        raise HTTPException(503, "Market monitor not running")
-    result = await market_monitor.mt5.send_close(
-        trade_id="smoke_test_1", symbol="XAUUSD", direction="long", volume=0.01,
-    )
-    return {"step": "send_close", "result": result}
-
-
 @app.get("/trading/backtest")
 async def backtest_symbol(symbol: str = "EURUSD=X"):
     if not market_monitor:
