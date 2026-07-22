@@ -327,6 +327,15 @@ def score_signal(
     e50_val  = base.get("e50", price)
     e200_val = base.get("e200", price)
 
+    # Trend reference for the "1_trend_aligned" checklist item must be the same
+    # frame that decided `direction` (4h/1d when available), not the 1h frame
+    # used above for pricing/chasing checks. Using 1h e50/e200 here would fail
+    # exactly the 1h-countertrend-pullback-into-HTF-trend entries that direction
+    # selection above was fixed (e6df757) to allow.
+    trend_ref      = scores[1] if htf_scores else base
+    trend_e50_val  = trend_ref.get("e50", price)
+    trend_e200_val = trend_ref.get("e200", price)
+
     # ── Asian Range Sweep (15m) — highest priority setup for gold ──────────────
     # When 15m data is available, check for the classic London-open liquidity grab
     # first. If found, it overrides ATR-based SL/TP with sweep-wick levels.
@@ -412,8 +421,8 @@ def score_signal(
 
     # ── 8-point pre-trade checklist ──
     checklist = {
-        "1_trend_aligned":    (direction == "long"  and e50_val > e200_val) or
-                              (direction == "short" and e50_val < e200_val),
+        "1_trend_aligned":    (direction == "long"  and trend_e50_val > trend_e200_val) or
+                              (direction == "short" and trend_e50_val < trend_e200_val),
         "2_confluence_3plus": confluence >= min_confluence,
         "3_sl_logical":       atr_val > 0 and abs(stop_loss - entry_price) > 0,
         "4_rr_min_1_2":       rr_ratio >= min_rr,
