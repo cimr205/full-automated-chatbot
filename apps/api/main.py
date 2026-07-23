@@ -579,6 +579,35 @@ async def backtest_symbol(symbol: str = "EURUSD=X"):
     return await trading_backtest.run_backtest(market_monitor.mt5, symbol)
 
 
+# ── TEMPORARY: diagnose why backtest finds 0 signals, remove after use ────────
+@app.get("/trading/_debug_signal")
+async def _debug_signal(symbol: str = "GC=F"):
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    from datetime import datetime, timezone
+    from core.trading.signal_engine import score_signal
+    from core.trading.market_monitor import _resample_4h
+
+    ohlcv = await trading_backtest.fetch_history(market_monitor.mt5, symbol, "1h", 210)
+    if len(ohlcv) < 210:
+        return {"error": f"only {len(ohlcv)} candles"}
+    window = ohlcv[-201:]
+    candle_time = datetime.fromtimestamp(window[-1][0] / 1000, tz=timezone.utc)
+    signal_backtest_style = score_signal(window, _resample_4h(window), None, at=candle_time)
+
+    ohlcv_1h_live = await market_monitor._fetch(symbol, "1h")
+    ohlcv_1d_live = await market_monitor._fetch(symbol, "1d")
+    signal_live_style = score_signal(
+        ohlcv_1h_live, _resample_4h(ohlcv_1h_live), ohlcv_1d_live,
+    )
+    return {
+        "raw_last_candle_ts": window[-1][0],
+        "candle_time_utc": candle_time.isoformat(),
+        "backtest_style": signal_backtest_style,
+        "live_style": signal_live_style,
+    }
+
+
 @app.post("/trading/optimize")
 async def trigger_optimize():
     """Kicks off the parameter sweep in the background — takes 45-60 min,
