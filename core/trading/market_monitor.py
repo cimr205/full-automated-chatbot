@@ -90,7 +90,13 @@ _RATES_COUNT = {
 class MarketMonitor:
     def __init__(self, redis: aioredis.Redis, db=None):
         self._redis    = redis
-        self._running  = False
+        # True from construction, not just once run() starts the periodic loop:
+        # _scan_all()'s per-symbol loop checks this to bail out early on stop(),
+        # but processes that intentionally never call run() (telegram-bot, which
+        # only does on-demand /scan without duplicating the periodic loop — see
+        # apps/telegram-bot/bot.py) still need on-demand scans to actually
+        # iterate symbols instead of exiting on the very first one.
+        self._running  = True
         self._last_signal: dict[str, dict] = {}
         self._last_snapshot: dict[str, dict] = {}   # for the per-cycle watchlist chart
         self._mt5_offline_since: float | None = None   # timestamp when MT5 first went offline
