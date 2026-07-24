@@ -18,21 +18,30 @@ import redis.asyncio as aioredis
 log = logging.getLogger(__name__)
 
 RISK_PER_TRADE_PCT        = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
-MAX_DAILY_LOSS_PCT        = float(os.getenv("RISK_MAX_DAILY_LOSS_PCT", "4.0"))
+# 3% default matches Equity Edge Instant/Pro Edge's daily loss limit (3% of starting
+# balance/equity) — tighter than the old 4% generic prop-firm default.
+MAX_DAILY_LOSS_PCT        = float(os.getenv("RISK_MAX_DAILY_LOSS_PCT", "3.0"))
 MAX_TOTAL_DRAWDOWN_PCT    = float(os.getenv("RISK_MAX_TOTAL_DRAWDOWN_PCT", "8.0"))
+# Equity Edge "15% consistency score": no single trading day's profit may exceed this
+# share of total net profit across the trailing payout cycle (14 calendar days) — else
+# payout eligibility is at risk. Not a loss-protection rule, a payout-eligibility one.
+CONSISTENCY_MAX_PCT       = float(os.getenv("RISK_CONSISTENCY_MAX_PCT", "15.0"))
+CONSISTENCY_CYCLE_DAYS    = int(os.getenv("RISK_CONSISTENCY_CYCLE_DAYS", "14"))
 # Hard ceiling in account currency — no single trade's stop-loss may ever risk more than
 # this, regardless of what RISK_PER_TRADE_PCT computes. Assumes the MT5 account currency
 # matches this value's currency (DKK by default) — check /risk, which shows the account's
 # actual currency, and adjust this env var if the account isn't in DKK.
 MAX_LOSS_PER_TRADE        = float(os.getenv("RISK_MAX_LOSS_PER_TRADE", "100"))
 
-DAY_START_KEY  = "trading:risk:day_start_equity"
-DAY_DATE_KEY   = "trading:risk:day_date"
-PEAK_KEY       = "trading:risk:peak_equity"
-LAST_KEY       = "trading:risk:last_equity"
-LOCK_KEY       = "trading:risk:locked"
-PAUSED_KEY     = "trading:paused"
-CURRENCY_KEY   = "trading:risk:currency"
+DAY_START_KEY       = "trading:risk:day_start_equity"
+DAY_DATE_KEY        = "trading:risk:day_date"
+PEAK_KEY            = "trading:risk:peak_equity"
+LAST_KEY            = "trading:risk:last_equity"
+LOCK_KEY            = "trading:risk:locked"
+PAUSED_KEY          = "trading:paused"
+CURRENCY_KEY        = "trading:risk:currency"
+DAILY_PNL_KEY        = "trading:risk:daily_pnl"          # hash: {date: realized/floating P&L that day}
+CONSISTENCY_PAUSE_KEY = "trading:risk:consistency_pause"  # auto-clears next broker day, unlike LOCK_KEY
 
 
 class RiskManager:
@@ -51,9 +60,17 @@ class RiskManager:
         stored_date = await self._redis.get(DAY_DATE_KEY)
 
         if stored_date != today:
-            # New broker day — reset the daily baseline (does NOT clear a lock)
+            # New broker day — archive yesterday's realized P&L for the consistency-score
+            # check, reset the daily baseline, and clear any consistency pause (it's a
+            # same-day-only guard, unlike the sticky drawdown LOCK_KEY which needs /unlock_risk).
+            if stored_date:
+                prev_start = float(await self._redis.get(DAY_START_KEY) or 0)
+                prev_last  = float(await self._redis.get(LAST_KEY) or prev_start)
+                if prev_start:
+                    await self._redis.hset(DAILY_PNL_KEY, stored_date, prev_last - prev_start)
             await self._redis.set(DAY_DATE_KEY, today)
             await self._redis.set(DAY_START_KEY, equity)
+            await self._redis.delete(CONSISTENCY_PAUSE_KEY)
 
         peak_raw = await self._redis.get(PEAK_KEY)
         peak = max(float(peak_raw), equity) if peak_raw else equity
@@ -73,6 +90,23 @@ class RiskManager:
         if breach_reason and not await self._redis.get(LOCK_KEY):
             await self._lock(breach_reason)
 
+        # Consistency-score guard (payout eligibility, not loss protection): if today's
+        # profit alone would already exceed CONSISTENCY_MAX_PCT of the trailing cycle's
+        # total net profit, pause new trades for the rest of today so the imbalance
+        # doesn't get worse. Clears automatically at the next broker day above.
+        today_pnl = equity - day_start
+        if today_pnl > 0 and not await self._redis.get(CONSISTENCY_PAUSE_KEY):
+            cycle_total, _ = await self._consistency_cycle_total(today, today_pnl)
+            if cycle_total > 0 and (today_pnl / cycle_total * 100) >= CONSISTENCY_MAX_PCT:
+                await self._redis.set(CONSISTENCY_PAUSE_KEY, "1")
+                await self._notify(
+                    f"⏸️ *Consistency-guard aktiveret*\n"
+                    f"Dagens profit (${today_pnl:.2f}) ville udgøre "
+                    f"{today_pnl / cycle_total * 100:.0f}% af {CONSISTENCY_CYCLE_DAYS}-dages "
+                    f"nettoprofit (max {CONSISTENCY_MAX_PCT:.0f}% — Equity Edge consistency score).\n"
+                    f"Ingen nye trades resten af dagen. Genoptages automatisk i morgen."
+                )
+
         if self._db:
             try:
                 await self._db.save_equity_snapshot(equity, balance)
@@ -90,7 +124,23 @@ class RiskManager:
             "currency": await self._redis.get(CURRENCY_KEY) or "?",
             "locked": bool(await self._redis.get(LOCK_KEY)),
             "paused": bool(await self._redis.get(PAUSED_KEY)),
+            "consistency_paused": bool(await self._redis.get(CONSISTENCY_PAUSE_KEY)),
         }
+
+    async def _consistency_cycle_total(self, today: str, today_pnl: float) -> tuple[float, list]:
+        """Net profit across the trailing CONSISTENCY_CYCLE_DAYS calendar days, including
+        today's running (unrealized-included) P&L. Returns (total, per-day list)."""
+        history = await self._redis.hgetall(DAILY_PNL_KEY)
+        today_dt = datetime.strptime(today, "%Y-%m-%d")
+        days = [today_pnl]
+        for date_str, pnl_str in history.items():
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if 0 <= (today_dt - d).days < CONSISTENCY_CYCLE_DAYS:
+                days.append(float(pnl_str))
+        return sum(days), days
 
     # ── Gatekeeper ────────────────────────────────────────────────────────────
 
@@ -100,6 +150,8 @@ class RiskManager:
         lock_reason = await self._redis.get(LOCK_KEY)
         if lock_reason:
             return False, f"Risk-lock aktiv: {lock_reason}"
+        if await self._redis.get(CONSISTENCY_PAUSE_KEY):
+            return False, "Consistency-guard aktiv (dagens profit-andel nået) — genoptages i morgen"
         return True, None
 
     async def status(self) -> dict:
@@ -109,8 +161,10 @@ class RiskManager:
             "peak_equity":      float(await self._redis.get(PEAK_KEY) or 0),
             "locked":           await self._redis.get(LOCK_KEY),
             "paused":           bool(await self._redis.get(PAUSED_KEY)),
+            "consistency_paused": bool(await self._redis.get(CONSISTENCY_PAUSE_KEY)),
             "max_daily_loss_pct":   MAX_DAILY_LOSS_PCT,
             "max_drawdown_pct":     MAX_TOTAL_DRAWDOWN_PCT,
+            "consistency_max_pct":  CONSISTENCY_MAX_PCT,
             "risk_per_trade_pct":   RISK_PER_TRADE_PCT,
             "max_loss_per_trade":   MAX_LOSS_PER_TRADE,
             "currency":             await self._redis.get(CURRENCY_KEY) or "?",

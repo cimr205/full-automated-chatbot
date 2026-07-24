@@ -99,18 +99,34 @@ class PositionManager:
         else:
             pnl_r = (entry - exit_price) / risk if risk else 0
 
+        closed_at = datetime.utcnow()
+        opened_ts = trade.get("filled_at") or trade.get("opened_at")
+        duration_min = None
+        if opened_ts:
+            try:
+                duration_min = (closed_at - datetime.fromisoformat(opened_ts)).total_seconds() / 60
+            except ValueError:
+                pass
+
         trade.update({
-            "status":     "closed",
-            "exit_price": exit_price,
+            "status":      "closed",
+            "exit_price":  exit_price,
             "exit_reason": reason,
-            "closed_at":  datetime.utcnow().isoformat(),
-            "pnl_r":      round(pnl_r, 2),
+            "closed_at":   closed_at.isoformat(),
+            "pnl_r":       round(pnl_r, 2),
+            "duration_min": round(duration_min, 1) if duration_min is not None else None,
         })
 
         await self._redis.hdel(POSITIONS_KEY, trade_id)
         await self._redis.lpush(HISTORY_KEY, json.dumps(trade))
         await self._redis.ltrim(HISTORY_KEY, 0, 999)
-        log.info("Trade closed: %s %s @ %s  P&L: %.2fR", trade_id, reason, exit_price, pnl_r)
+        log.info("Trade closed: %s %s @ %s  P&L: %.2fR  duration: %s min",
+                  trade_id, reason, exit_price, pnl_r, duration_min)
+
+        try:
+            await self._check_compliance(trade, pnl_r, duration_min)
+        except Exception as e:
+            log.warning("Compliance check failed: %s", e)
 
         try:
             await learning.record_outcome(self._redis, trade)
@@ -123,6 +139,37 @@ class PositionManager:
             log.warning("Retrospective analyse failed: %s", e)
 
         return trade
+
+    async def _check_compliance(self, trade: dict, pnl_r: float, duration_min: float | None):
+        """Equity Edge payout-eligibility flags — these can't be prevented after the
+        fact, only surfaced so they're not a surprise at payout time:
+          - trades under 2 min: profit gets deducted at payout
+          - largest loss exceeding largest win: a hard payout-eligibility rule
+        Tracked in R-multiples (position sizing keeps risk ~constant, so R is a fair
+        proxy for dollar comparison without needing a separate P&L reconstruction)."""
+        if duration_min is not None and duration_min < 2 and pnl_r > 0:
+            await self._notify(
+                f"⚠️ *Trade under 2 min* ({duration_min:.1f} min, {trade['symbol']})\n"
+                f"Profit fra denne trade bliver trukket fra ved payout (Equity Edge-regel)."
+            )
+
+        largest_win  = float(await self._redis.get("trading:compliance:largest_win_r") or 0)
+        largest_loss = float(await self._redis.get("trading:compliance:largest_loss_r") or 0)
+        if pnl_r > largest_win:
+            await self._redis.set("trading:compliance:largest_win_r", pnl_r)
+        elif pnl_r < 0 and abs(pnl_r) > largest_loss:
+            await self._redis.set("trading:compliance:largest_loss_r", abs(pnl_r))
+            if abs(pnl_r) > largest_win:
+                await self._notify(
+                    f"⚠️ *Største tab overstiger største gevinst*\n"
+                    f"Tab: {abs(pnl_r):.2f}R vs. hidtidig største gevinst: {largest_win:.2f}R\n"
+                    f"Bryder Equity Edge's regel om at største tab ikke må overstige største gevinst."
+                )
+
+    async def _notify(self, message: str):
+        await self._redis.publish("supervisor:notifications", json.dumps({
+            "message": message, "parse_mode": "Markdown", "task_id": "compliance",
+        }))
 
     async def list_open(self) -> list[dict]:
         raw = await self._redis.hgetall(POSITIONS_KEY)
@@ -316,7 +363,8 @@ class PositionManager:
             f"{reason}\n\n"
             f"Entry:  `{fmt(trade['entry'])}`\n"
             f"Exit:   `{fmt(trade.get('exit_price', 0))}`\n"
-            f"P&L:    `{pnl_r:+.2f}R`\n\n"
+            f"P&L:    `{pnl_r:+.2f}R`\n"
+            f"Varighed: `{trade.get('duration_min', '?')} min`\n\n"
             f"_Åbnet: {trade.get('opened_at', '')[:16]}_\n"
             f"_Lukket: {trade.get('closed_at', '')[:16]}_"
         )
