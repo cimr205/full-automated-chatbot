@@ -123,6 +123,7 @@ class MarketMonitor:
                 await self._scan_all()
             except Exception as e:
                 log.error("Monitor scan error: %s", e)
+                await self._notify(f"🔴 *Scan-loop fejl*: {e}")
             await asyncio.sleep(MONITOR_INTERVAL)
 
     def stop(self):
@@ -185,6 +186,7 @@ class MarketMonitor:
                 await self._analyze(symbol, market)
             except Exception as e:
                 log.warning("[%s] analyze error: %s", symbol, e)
+                await self._notify_block(symbol, f"🔴 Fejl under scan: {e}")
             await asyncio.sleep(2)   # gentle rate limit
         # Watchlist chart used to auto-send every cycle here — removed,
         # it's a non-trade notification and contributed to message overload.
@@ -196,6 +198,7 @@ class MarketMonitor:
         ohlcv_1h  = await self._fetch(symbol, "1h")
         if not ohlcv_1h or len(ohlcv_1h) < 50:
             log.debug("[%s] Not enough 1h data", symbol)
+            await self._notify_block(symbol, "Kan ikke hente nok 1h-data fra MT5 lige nu.")
             return
 
         ohlcv_4h = _resample_4h(ohlcv_1h)
@@ -235,6 +238,8 @@ class MarketMonitor:
         confidence = signal["confidence"]
 
         if direction == "neutral":
+            reason = "; ".join(signal.get("reasons") or []) or "Ingen klar retning lige nu."
+            await self._notify_block(symbol, f"Neutral — {reason}")
             return
 
         # Pre-trade checklist — all hard checks must pass
@@ -242,11 +247,13 @@ class MarketMonitor:
             checklist = signal.get("checklist", {})
             failed = [k for k, v in checklist.items() if not v]
             log.info("[%s] Checklist failed: %s", symbol, failed)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men checklist fejlede: {', '.join(failed)}")
             return
 
         conf_thresh = overrides.get("confidence_thresh", CONFIDENCE_THRESH)
         if confidence < conf_thresh:
             log.debug("[%s] Confidence too low: %.0f%% (need %.0f%%)", symbol, confidence * 100, conf_thresh * 100)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men under confidence-grænsen ({conf_thresh:.0%}).")
             return
 
         # News filter — no trading 45 min around high-impact USD/Gold events
@@ -260,6 +267,7 @@ class MarketMonitor:
         can_trade, lock_reason = await self.risk.check_can_trade()
         if not can_trade:
             log.info("[%s] Skipped — %s", symbol, lock_reason)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men risk-gate: {lock_reason}")
             return
 
         # Learning gate — setups with a clearly bad real track record are blocked
@@ -267,17 +275,20 @@ class MarketMonitor:
         setup_type = signal.get("setup_type")
         if await learning.is_blocked(self._redis, setup_type, symbol=symbol):
             log.info("[%s] Setup '%s' is blocked by learning — skipping", symbol, setup_type)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men setup '{setup_type}' er blokeret af learning (dårlig historisk win rate).")
             return
 
         # Borderline confidence — don't act on a single read. Require the
         # *next* scan to reproduce the same direction + setup before entering.
         if not await self._confirmed(symbol, direction, setup_type, confidence):
             log.info("[%s] Borderline signal (%.0f%%) — waiting for re-confirmation", symbol, confidence * 100)
+            await self._notify_block(symbol, f"Borderline signal ({direction}, {confidence:.0%}) — venter på bekræftelse næste scan.")
             return
 
         # Daily cap: 1 perfect trade per day — no second-guessing once we're in
         if await self._daily_cap_reached():
             log.info("Daily cap reached (1 trade/day) — skipping %s", symbol)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men dagens handel er allerede brugt (max {DAILY_TRADE_CAP}/dag).")
             return
 
         # Cooldown: don't repeat same direction within SIGNAL_COOLDOWN seconds
@@ -285,6 +296,7 @@ class MarketMonitor:
         last = self._last_signal.get(symbol, {})
         if last.get("direction") == direction and now - last.get("ts", 0) < SIGNAL_COOLDOWN:
             log.debug("[%s] Cooldown active, skipping", symbol)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men cooldown aktiv efter sidste {direction}-signal.")
             return
 
         self._last_signal[symbol] = {"direction": direction, "ts": now}
@@ -319,12 +331,15 @@ class MarketMonitor:
         tp    = signal["take_profit"]
         if direction == "long" and not (sl < entry < tp):
             log.error("[%s] Invalid levels for LONG: entry=%s sl=%s tp=%s — skipping", symbol, entry, sl, tp)
+            await self._notify_block(symbol, f"⚠️ Ugyldige SL/TP-niveauer for LONG (entry={entry}, sl={sl}, tp={tp}) — signal droppet, ikke sendt til MT5.")
             return
         if direction == "short" and not (tp < entry < sl):
             log.error("[%s] Invalid levels for SHORT: entry=%s sl=%s tp=%s — skipping", symbol, entry, sl, tp)
+            await self._notify_block(symbol, f"⚠️ Ugyldige SL/TP-niveauer for SHORT (entry={entry}, sl={sl}, tp={tp}) — signal droppet, ikke sendt til MT5.")
             return
         if entry <= 0 or sl <= 0 or tp <= 0:
             log.error("[%s] Zero price level detected — skipping", symbol)
+            await self._notify_block(symbol, "⚠️ Pris/SL/TP på 0 registreret — signal droppet, ikke sendt til MT5.")
             return
 
         trade_id  = f"trade_{uuid.uuid4().hex[:8]}"
@@ -663,6 +678,18 @@ class MarketMonitor:
         await self._redis.publish("supervisor:notifications", json.dumps({
             "message": message, "parse_mode": "Markdown", "task_id": "market_monitor",
         }))
+
+    async def _notify_block(self, symbol: str, reason: str):
+        """Tell the user why a scan didn't lead to a trade. Debounced per
+        symbol so an unchanged reason (still locked, still low confidence,
+        still neutral) sends once, not every 15-min cycle — but any change
+        in reason, or a fresh problem, always gets a fresh message."""
+        key  = f"trading:last_block_reason:{symbol}"
+        last = await self._redis.get(key)
+        if last == reason:
+            return
+        await self._redis.set(key, reason, ex=86400)
+        await self._notify(f"⏸️ *{symbol}*: {reason}")
 
     async def _journal(self, symbol: str, market: str, signal: dict, published: bool):
         try:
