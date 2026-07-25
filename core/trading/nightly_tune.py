@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import os
-this is not valid python syntax !!! TEST_ERROR_FOR_SLACK_ALERT
 import sys
 from datetime import datetime, timezone
 
