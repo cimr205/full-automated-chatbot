@@ -649,6 +649,7 @@ async def get_screenshot(filename: str):
 @app.post("/debug/_webhook_echo")
 async def _webhook_echo(request: Request):
     body = await request.body()
+    log.info("WEBHOOK_ECHO_HEADERS: %s", dict(request.headers))
     log.info("WEBHOOK_ECHO: %s", body.decode("utf-8", errors="replace"))
     return {"ok": True}
 
