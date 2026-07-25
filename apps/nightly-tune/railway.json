@@ -5,6 +5,7 @@
     "dockerfilePath": "apps/nightly-tune/Dockerfile"
   },
   "deploy": {
+    "cronSchedule": "0 22 * * *",
     "restartPolicyType": "NEVER"
   }
 }
