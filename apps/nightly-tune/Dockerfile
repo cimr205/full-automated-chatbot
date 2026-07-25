@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN this-is-a-test-build-failure-for-slack-alert-verification
 
 COPY . .
 
