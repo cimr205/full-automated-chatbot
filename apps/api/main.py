@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -643,15 +643,6 @@ async def get_screenshot(filename: str):
     if not os.path.exists(path):
         raise HTTPException(404, "Screenshot not found")
     return FileResponse(path, media_type="image/png")
-
-
-# TEMPORARY: capture the exact raw Railway webhook payload shape, remove after use
-@app.post("/debug/_webhook_echo")
-async def _webhook_echo(request: Request):
-    body = await request.body()
-    log.info("WEBHOOK_ECHO_HEADERS: %s", dict(request.headers))
-    log.info("WEBHOOK_ECHO: %s", body.decode("utf-8", errors="replace"))
-    return {"ok": True}
 
 
 @app.get("/health")
