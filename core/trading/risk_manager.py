@@ -177,6 +177,26 @@ class RiskManager:
             await self._notify("🔓 *Risk-lock fjernet manuelt* — trading genoptaget.")
         return was_locked
 
+    async def reset_baseline(self) -> dict:
+        """Re-anchor day_start/peak equity to the current live reading — for
+        deliberate account swaps, where the old baseline is from a different
+        account entirely and would otherwise register as a fake profit/loss
+        against the new one. Does not touch the drawdown/daily-loss lock or
+        the consistency-score history (that's what unlock()/day-rollover do)."""
+        equity = float(await self._redis.get(LAST_KEY) or 0)
+        if not equity:
+            return {"reset": False, "reason": "no equity reading yet"}
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await self._redis.set(DAY_START_KEY, equity)
+        await self._redis.set(PEAK_KEY, equity)
+        await self._redis.set(DAY_DATE_KEY, today)
+        await self._redis.delete(CONSISTENCY_PAUSE_KEY)
+        await self._notify(
+            f"🔄 *Risk-baseline nulstillet* til nuværende equity (${equity:.2f}) — "
+            f"bruges til dagligt tab / drawdown / consistency-score fremover."
+        )
+        return {"reset": True, "new_baseline": equity}
+
     async def _lock(self, reason: str):
         await self._redis.set(LOCK_KEY, reason)
         await self._notify(

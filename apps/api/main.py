@@ -567,6 +567,16 @@ async def unlock_risk():
     return {"status": "unlocked" if was_locked else "was_not_locked"}
 
 
+@app.post("/trading/reset-risk-baseline")
+async def reset_risk_baseline():
+    """For deliberate MT5 account swaps — re-anchors day-start/peak equity to
+    the current reading so the new account's numbers aren't compared against
+    the old account's. Does not touch the drawdown lock itself."""
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    return await market_monitor.risk.reset_baseline()
+
+
 @app.get("/trading/lessons")
 async def get_lessons():
     return await trading_learning.all_stats(redis_client)
