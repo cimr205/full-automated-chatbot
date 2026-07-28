@@ -27,6 +27,11 @@ MAX_TOTAL_DRAWDOWN_PCT    = float(os.getenv("RISK_MAX_TOTAL_DRAWDOWN_PCT", "8.0"
 # payout eligibility is at risk. Not a loss-protection rule, a payout-eligibility one.
 CONSISTENCY_MAX_PCT       = float(os.getenv("RISK_CONSISTENCY_MAX_PCT", "15.0"))
 CONSISTENCY_CYCLE_DAYS    = int(os.getenv("RISK_CONSISTENCY_CYCLE_DAYS", "14"))
+# On a brand-new account (or right after a reset_baseline swap), day 1's profit is
+# mathematically 100% of "all profit ever" simply because there's no prior history
+# to divide by -- the guard would trip on literally any winning first day. Require
+# at least this many PRIOR days of recorded history before enforcing the cap at all.
+CONSISTENCY_MIN_HISTORY_DAYS = int(os.getenv("RISK_CONSISTENCY_MIN_HISTORY_DAYS", "3"))
 # Hard ceiling in account currency — no single trade's stop-loss may ever risk more than
 # this, regardless of what RISK_PER_TRADE_PCT computes. Assumes the MT5 account currency
 # matches this value's currency (DKK by default) — check /risk, which shows the account's
@@ -96,8 +101,10 @@ class RiskManager:
         # doesn't get worse. Clears automatically at the next broker day above.
         today_pnl = equity - day_start
         if today_pnl > 0 and not await self._redis.get(CONSISTENCY_PAUSE_KEY):
-            cycle_total, _ = await self._consistency_cycle_total(today, today_pnl)
-            if cycle_total > 0 and (today_pnl / cycle_total * 100) >= CONSISTENCY_MAX_PCT:
+            cycle_total, cycle_days = await self._consistency_cycle_total(today, today_pnl)
+            prior_days = len(cycle_days) - 1   # cycle_days always includes today itself
+            if (prior_days >= CONSISTENCY_MIN_HISTORY_DAYS
+                    and cycle_total > 0 and (today_pnl / cycle_total * 100) >= CONSISTENCY_MAX_PCT):
                 await self._redis.set(CONSISTENCY_PAUSE_KEY, "1")
                 await self._notify(
                     f"⏸️ *Consistency-guard aktiveret*\n"
@@ -172,10 +179,12 @@ class RiskManager:
 
     async def unlock(self) -> bool:
         was_locked = bool(await self._redis.get(LOCK_KEY))
+        was_consistency_paused = bool(await self._redis.get(CONSISTENCY_PAUSE_KEY))
         await self._redis.delete(LOCK_KEY)
-        if was_locked:
+        await self._redis.delete(CONSISTENCY_PAUSE_KEY)
+        if was_locked or was_consistency_paused:
             await self._notify("🔓 *Risk-lock fjernet manuelt* — trading genoptaget.")
-        return was_locked
+        return was_locked or was_consistency_paused
 
     async def reset_baseline(self) -> dict:
         """Re-anchor day_start/peak equity to the current live reading — for
