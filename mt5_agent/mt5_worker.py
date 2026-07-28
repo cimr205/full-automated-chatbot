@@ -265,10 +265,12 @@ def mt5_get_account_info() -> dict:
         return {"error": f"account_info fejlede: {mt5.last_error()}"}
 
     return {
-        "balance":  info.balance,
-        "equity":   info.equity,
-        "margin":   info.margin,
-        "currency": info.currency,
+        "balance":     info.balance,
+        "equity":      info.equity,
+        "margin":      info.margin,
+        "margin_free": info.margin_free,
+        "leverage":    info.leverage,
+        "currency":    info.currency,
     }
 
 

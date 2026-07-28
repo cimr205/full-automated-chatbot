@@ -217,17 +217,28 @@ class RiskManager:
         return min(pct_based, MAX_LOSS_PER_TRADE)
 
     @staticmethod
-    def compute_volume(risk_amount: float, sl_distance: float, symbol_info: dict) -> float:
+    def compute_volume(risk_amount: float, sl_distance: float, symbol_info: dict,
+                      entry_price: float = 0, margin_free: float = 0, leverage: float = 0) -> float:
         """
         Lot size so that hitting the stop loses ~risk_amount, using the
         broker's own tick value/size for this symbol (correct for both
         forex pairs and XAUUSD, whose contract size differs a lot).
+
+        Also capped by actually available margin when entry_price/margin_free/
+        leverage are supplied — risk_amount alone only controls the dollar
+        loss IF the stop is hit, it says nothing about whether the account
+        can even afford to open that many lots in the first place. On a
+        low-leverage account (e.g. 1:10 on metals) the risk-based size can
+        come out well beyond what's marginable, which the broker then
+        rejects outright (MT5 error 10019 "no money") instead of opening
+        a smaller position.
         """
-        tick_value = symbol_info.get("trade_tick_value") or 0
-        tick_size  = symbol_info.get("trade_tick_size") or 0
-        vol_min    = symbol_info.get("volume_min", 0.01)
-        vol_max    = symbol_info.get("volume_max", 100.0)
-        vol_step   = symbol_info.get("volume_step", 0.01)
+        tick_value     = symbol_info.get("trade_tick_value") or 0
+        tick_size      = symbol_info.get("trade_tick_size") or 0
+        contract_size  = symbol_info.get("trade_contract_size") or 0
+        vol_min        = symbol_info.get("volume_min", 0.01)
+        vol_max        = symbol_info.get("volume_max", 100.0)
+        vol_step       = symbol_info.get("volume_step", 0.01)
 
         if not tick_value or not tick_size or sl_distance <= 0:
             return vol_min
@@ -238,6 +249,16 @@ class RiskManager:
             return vol_min
 
         volume = risk_amount / loss_per_lot
+
+        if entry_price > 0 and margin_free > 0 and leverage > 0 and contract_size > 0:
+            margin_per_lot = (contract_size * entry_price) / leverage
+            if margin_per_lot > 0:
+                # only ever use a portion of free margin for one new position —
+                # leaves room for spread/slippage vs. this estimate and for
+                # other positions/safety buffer
+                max_volume_by_margin = (margin_free * 0.8) / margin_per_lot
+                volume = min(volume, max_volume_by_margin)
+
         volume = max(vol_min, min(vol_max, volume))
         # round down to nearest step so we never risk more than intended
         steps = int(volume / vol_step)

@@ -819,7 +819,26 @@ class MarketMonitor:
                 return None
             risk_amount = self.risk.risk_amount(equity)
             sl_distance = abs(entry - stop_loss)
-            return self.risk.compute_volume(risk_amount, sl_distance, symbol_info)
+
+            # Fresh margin/leverage (not the cached risk status) so sizing never
+            # exceeds what the account can actually afford to open — risk_amount
+            # alone only bounds the loss IF stopped out, not whether the position
+            # is marginable at all (bites hard on low-leverage accounts, e.g.
+            # 1:10 on metals, where a risk-sized lot can be un-affordable).
+            margin_free = 0.0
+            leverage = 0.0
+            try:
+                account_info = await self.mt5.get_account_info()
+                if "error" not in account_info:
+                    margin_free = float(account_info.get("margin_free") or 0)
+                    leverage = float(account_info.get("leverage") or 0)
+            except Exception as e:
+                log.warning("[%s] margin lookup failed, sizing without margin cap: %s", symbol, e)
+
+            return self.risk.compute_volume(
+                risk_amount, sl_distance, symbol_info,
+                entry_price=entry, margin_free=margin_free, leverage=leverage,
+            )
         except Exception as e:
             log.warning("[%s] sizing failed, falling back to default lot: %s", symbol, e)
             return None
