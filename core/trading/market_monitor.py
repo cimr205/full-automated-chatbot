@@ -35,7 +35,7 @@ FIXED_LOT_SIZE     = float(os.getenv("TRADE_FIXED_LOT_SIZE", "0"))  # >0 = skip 
 PENDING_KEY_PREFIX = "trading:pending:"
 TUNED_KEY_PREFIX   = "trading:tuned_params:"   # written by core/trading/nightly_tune.py
 PENDING_TTL        = MONITOR_INTERVAL * 2
-DAILY_TRADE_CAP    = 1   # one perfect trade per day
+DAILY_TRADE_CAP    = int(os.getenv("DAILY_TRADE_CAP", "1"))   # max qualifying trades per day
 
 # ── Default watchlists ────────────────────────────────────────────────────────
 
