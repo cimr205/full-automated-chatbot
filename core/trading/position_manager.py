@@ -320,14 +320,16 @@ class PositionManager:
             await self._notify_close(closed, "🎯 Take Profit ramt")
             return
 
-        # Partial profit level hit — take note and auto-move SL to breakeven on MT5
+        # Partial profit level hit — move SL to breakeven on MT5 FIRST, only mark
+        # it done locally once the broker actually confirms it. Marking it done
+        # unconditionally (as this used to) meant a failed broker-side move still
+        # looked successful in every notification and record, while the real
+        # position kept its original stop — silently leaving full risk on the
+        # table exactly when the trade looked protected. Leaving partial_taken
+        # False on failure means this retries automatically next check cycle
+        # (price is still past the partial level), instead of giving up for good.
         if partial_hit:
-            trade["partial_taken"] = True
-            trade["stop_loss"] = entry   # update local record to BE
-            await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
-            await self._notify_partial(trade, price)
-
-            # Auto-move SL to breakeven on MT5 if bridge is available
+            mod_result = {"error": "MT5 bridge ikke tilgængelig"}
             if self._mt5:
                 try:
                     mod_result = await self._mt5.modify_trade(
@@ -336,14 +338,28 @@ class PositionManager:
                         new_sl=entry,
                         new_tp=trade["take_profit"],
                     )
-                    if "error" in mod_result:
-                        log.warning("[%s] Auto-BE move failed on MT5: %s",
-                                    trade["symbol"], mod_result["error"])
-                    else:
-                        log.info("[%s] SL moved to breakeven @ %s on MT5",
-                                 trade["symbol"], entry)
                 except Exception as e:
-                    log.warning("[%s] Auto-BE move exception: %s", trade["symbol"], e)
+                    mod_result = {"error": str(e)}
+
+            if "error" not in mod_result:
+                trade["partial_taken"] = True
+                trade["stop_loss"] = entry   # update local record to BE
+                await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
+                await self._notify_partial(trade, price)
+                await self._redis.delete(f"trading:be_alert_sent:{trade_id}")
+                log.info("[%s] SL moved to breakeven @ %s on MT5", trade["symbol"], entry)
+            else:
+                log.warning("[%s] Auto-BE move failed on MT5: %s", trade["symbol"], mod_result["error"])
+                alert_key = f"trading:be_alert_sent:{trade_id}"
+                if not await self._redis.get(alert_key):
+                    await self._redis.set(alert_key, "1", ex=3600)
+                    await self._notify(
+                        f"⚠️ *Auto-breakeven fejlede* — {trade['symbol']} ramte 1.5R, men MT5 "
+                        f"afviste SL-flytningen: {mod_result['error']}\n"
+                        f"Den rigtige stop loss på kontoen er STADIG den oprindelige, ikke breakeven. "
+                        f"Botten prøver automatisk igen hvert minut — tjek positionen manuelt hvis det "
+                        f"bliver ved med at fejle."
+                    )
 
     async def _notify_close(self, trade: dict, reason: str):
         if not trade:

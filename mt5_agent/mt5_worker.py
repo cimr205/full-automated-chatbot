@@ -331,17 +331,19 @@ def mt5_modify_trade(ticket: int, symbol: str, new_sl: float, new_tp: float) -> 
         return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
 
     request = {
-        "action":   mt5.TRADE_ACTION_SLTP,
-        "position": ticket,
-        "symbol":   symbol,
-        "sl":       new_sl,
-        "tp":       new_tp,
+        "action":    mt5.TRADE_ACTION_SLTP,
+        "position":  ticket,
+        "symbol":    symbol,
+        "sl":        new_sl,
+        "tp":        new_tp,
+        "magic":     MT5_MAGIC,
+        "type_time": mt5.ORDER_TIME_GTC,
     }
     result = mt5.order_send(request)
     mt5.shutdown()
 
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-        err = result.comment if result else "None"
+        err = f"{result.retcode}: {result.comment}" if result else "None"
         return {"error": f"SL/TP opdatering fejlede: {err}"}
     return {"modified": True, "ticket": ticket, "sl": new_sl, "tp": new_tp}
 
