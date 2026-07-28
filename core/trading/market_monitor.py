@@ -193,6 +193,27 @@ class MarketMonitor:
         # Available on demand via /chart instead (see _send_watchlist_chart).
 
     async def _analyze(self, symbol: str, market: str):
+        """Acquire a distributed per-symbol lock before doing any real analysis.
+        Without this, two overlapping calls (e.g. rapid repeated /scan presses,
+        or the periodic loop and an on-demand /scan landing close together --
+        possibly from different processes entirely, telegram-bot vs the api
+        service) can each independently pass cooldown/daily-cap/etc. before
+        either has updated that shared state, and both end up opening real
+        duplicate positions on the same signal. A plain in-process asyncio.Lock
+        wouldn't catch the cross-process case; this uses Redis so it's shared
+        by whichever process gets there first. 30s TTL as a crash safety net
+        so a dead process can never leave this stuck locked forever."""
+        lock_key = f"trading:analyze_lock:{symbol}"
+        got_lock = await self._redis.set(lock_key, "1", nx=True, ex=30)
+        if not got_lock:
+            log.info("[%s] Analyze already running elsewhere, skipping", symbol)
+            return
+        try:
+            await self._analyze_locked(symbol, market)
+        finally:
+            await self._redis.delete(lock_key)
+
+    async def _analyze_locked(self, symbol: str, market: str):
         # Fetch all timeframes: 15m (entry), 1h (structure), 4h + daily (bias)
         ohlcv_15m = await self._fetch(symbol, "15m")
         ohlcv_1h  = await self._fetch(symbol, "1h")
