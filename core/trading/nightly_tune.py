@@ -28,8 +28,18 @@ from .optimize import run_sweep
 
 log = logging.getLogger(__name__)
 
-TUNED_KEY_PREFIX = "trading:tuned_params:"
+TUNED_KEY_PREFIX     = "trading:tuned_params:"
+CANDIDATE_KEY_PREFIX = "trading:tune_candidate:"
 SYMBOLS = ["GC=F"]   # gold-only account — see DEFAULT_FOREX in market_monitor.py
+
+# A single night's sweep is one sample of noisy, short-window data — pushing
+# whatever it finds straight to live trading is how the 0.75x/5.0x SL/TP
+# mismatch happened (a value from one sweep silently paired with an unrelated
+# default). Require the SAME combo to win REQUIRED_STREAK nights in a row
+# before it actually goes live; a one-off outlier night just resets the
+# streak instead of taking effect immediately.
+REQUIRED_STREAK = 3
+TRACKED_FIELDS  = ("MIN_CONFLUENCE", "ATR_SL_MULT", "ATR_TP_MULT", "MIN_RR", "confidence_thresh")
 
 
 async def _notify(redis, message: str):
@@ -68,8 +78,33 @@ async def run():
             return
 
         best = result["top_10"][0]
-        key  = f"{TUNED_KEY_PREFIX}{SYMBOLS[0]}"
-        old  = await redis.hgetall(key)
+        symbol = SYMBOLS[0]
+        candidate_key = f"{CANDIDATE_KEY_PREFIX}{symbol}"
+        stored = await redis.hgetall(candidate_key)
+
+        same_as_stored = bool(stored) and all(
+            abs(float(stored.get(f, "nan") or "nan") - float(best[f])) < 1e-9
+            for f in TRACKED_FIELDS
+        )
+        streak = int(stored.get("streak", 0)) + 1 if same_as_stored else 1
+
+        candidate_values = {f: best[f] for f in TRACKED_FIELDS}
+        await redis.hset(candidate_key, mapping={**candidate_values, "streak": streak})
+
+        if streak < REQUIRED_STREAK:
+            await _notify(redis,
+                f"🌙 *Nightly tune — XAUUSD*: ny kandidat set ({streak}/{REQUIRED_STREAK} nætter) — "
+                f"SL {best['ATR_SL_MULT']}x / TP {best['ATR_TP_MULT']}x ATR, "
+                f"{best['win_rate']:.0%} win rate, {best['avg_r']:+.2f}R/trade i backtest.\n"
+                f"Skal bekræftes {REQUIRED_STREAK - streak} nat(-ter) mere før den går live — "
+                f"nuværende parametre er uændrede."
+            )
+            log.info("Nightly tune: candidate streak %d/%d, not yet live: %s",
+                      streak, REQUIRED_STREAK, candidate_values)
+            return
+
+        key = f"{TUNED_KEY_PREFIX}{symbol}"
+        old = await redis.hgetall(key)
 
         new_values = {
             "min_confluence":    best["MIN_CONFLUENCE"],
@@ -91,7 +126,7 @@ async def run():
             return f"{old_val}{suffix} → {new_val}{suffix}"
 
         msg = (
-            f"🌙 *Nightly tune — XAUUSD*\n"
+            f"🌙 *Nightly tune — XAUUSD*: bekræftet {REQUIRED_STREAK} nætter i træk, nu LIVE\n"
             f"{best['total_trades']} trades i backtest, {best['win_rate']:.0%} win rate, "
             f"{best['avg_r']:+.2f}R/trade forventning\n\n"
             f"SL: {diff('atr_sl_mult', best['ATR_SL_MULT'], 'x ATR')}\n"

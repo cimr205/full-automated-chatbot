@@ -18,6 +18,7 @@ MIN_SAMPLE   = 5      # don't judge a setup until it's been tried a few times
 MIN_WIN_RATE = 0.35   # below this (with enough samples), stop using it
 KEY_PREFIX   = "trading:learning:"
 BLOCKED_KEY  = "trading:learning:blocked"
+GOLD_SYMBOL  = "GC=F"  # this account trades gold only — see DEFAULT_FOREX in market_monitor.py
 
 
 async def record_outcome(redis: aioredis.Redis, trade: dict):
@@ -160,11 +161,24 @@ async def seed_setup_priors(redis: aioredis.Redis) -> None:
         key = f"{KEY_PREFIX}{setup}"
         if not await redis.exists(key):
             await redis.hset(key, mapping=counts)
+        # Also seed gold's own per-symbol prior. Per-symbol keys otherwise
+        # start from true zero history (seed_setup_priors only ever wrote the
+        # global key), so on a gold-only account a handful of real trades —
+        # even ones distorted by an unrelated bug — can swing a block/no-block
+        # verdict hard in either direction (this is exactly what happened to
+        # bearish_fvg on 2026-07-28/29). Reusing the same backtest-derived
+        # counts as gold's own starting point is an approximation, but a far
+        # more stable one than no prior at all.
+        sym_key = f"{KEY_PREFIX}{setup}:{GOLD_SYMBOL}"
+        if not await redis.exists(sym_key):
+            await redis.hset(sym_key, mapping=counts)
 
-    # Immediately mark pullbacks as globally blocked (backtest is definitive)
+    # Immediately mark pullbacks as blocked, globally and for gold specifically
+    # (backtest is definitive: 0% WR across all 10 symbols tested).
     for setup in ("bullish_pullback", "bearish_pullback"):
         if not await redis.sismember(BLOCKED_KEY, setup):
             await redis.sadd(BLOCKED_KEY, setup)
+            await redis.sadd(f"{BLOCKED_KEY}:{GOLD_SYMBOL}", setup)
             await _notify(redis,
                 f"🧠 *Backtest: {setup} blokeret*\n"
                 f"0% win rate over 10 symboler i 180-dages backtest — "
