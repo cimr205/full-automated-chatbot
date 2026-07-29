@@ -60,7 +60,15 @@ MT5_SYMBOL_MAP = {
 # at the standard 3-factor bar. Nothing here overrides risk management.
 SYMBOL_OVERRIDES = {
     # Gold — actual 192-combo sweep: SL=0.75x beats 1.0x by +0.13R/trade
-    "GC=F":    {"atr_sl_mult": 0.75},
+    # (35.9% win rate, +0.80R/trade), tested against the TP=3.0x that was
+    # the global default at sweep time. atr_tp_mult pinned here explicitly:
+    # the 2026-06-26 change that raised the *global* ATR_TP_MULT default to
+    # 5.0 (to compensate for a much tighter 0.2x global SL) was silently
+    # inherited by GC=F too, since this entry never set its own TP — that
+    # produced a live 0.75x/5.0x combo (6.67:1 R:R) that was never actually
+    # backtested together and got 3 real trades stopped out on noise on
+    # 2026-07-28. Pin it to the pairing that was actually validated.
+    "GC=F":    {"atr_sl_mult": 0.75, "atr_tp_mult": 3.0},
     # GBP pairs — higher volatility, SMC setups hit TP faster → tighter SL, smaller TP
     "GBPUSD=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 2.5},
     "GBPJPY=X": {"atr_sl_mult": 1.25, "atr_tp_mult": 3.5, "min_confluence": 4},
