@@ -582,6 +582,16 @@ async def get_lessons():
     return await trading_learning.all_stats(redis_client)
 
 
+@app.post("/trading/learning/unblock")
+async def unblock_learning(setup: str, symbol: str | None = None, reset_counts: bool = False):
+    """Manually lift a learning block. Use reset_counts=true when the losing
+    streak that earned the block is a known data artifact (e.g. the
+    duplicate-trade bug tripling one signal into several recorded losses),
+    not genuine independent evidence — otherwise the stale counts just
+    re-trigger the block on the next loss."""
+    return await trading_learning.unblock(redis_client, setup, symbol, reset_counts)
+
+
 @app.get("/trading/backtest")
 async def backtest_symbol(symbol: str = "EURUSD=X"):
     if not market_monitor:

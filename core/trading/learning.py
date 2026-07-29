@@ -79,6 +79,27 @@ async def is_blocked(redis: aioredis.Redis, setup_type: str | None,
     return bool(await redis.sismember(BLOCKED_KEY, setup_type))
 
 
+async def unblock(redis: aioredis.Redis, setup_type: str, symbol: str | None = None,
+                   reset_counts: bool = False) -> dict:
+    """Manually clear a learning block — for cases where the losing streak that
+    earned it is known to be a data artifact (e.g. a duplicate-trade bug
+    tripling one real signal into several recorded losses) rather than
+    genuine independent evidence the setup doesn't work."""
+    removed_global = removed_symbol = False
+    if symbol:
+        sym_blocked_key = f"{BLOCKED_KEY}:{symbol}"
+        removed_symbol = bool(await redis.srem(sym_blocked_key, setup_type))
+        if reset_counts:
+            await redis.delete(f"{KEY_PREFIX}{setup_type}:{symbol}")
+    else:
+        removed_global = bool(await redis.srem(BLOCKED_KEY, setup_type))
+        if reset_counts:
+            await redis.delete(f"{KEY_PREFIX}{setup_type}")
+    return {"setup": setup_type, "symbol": symbol,
+            "was_blocked": removed_global or removed_symbol,
+            "counts_reset": reset_counts}
+
+
 async def all_stats(redis: aioredis.Redis) -> dict:
     """Return global stats per setup type (not per-symbol breakdown)."""
     setups = set()
