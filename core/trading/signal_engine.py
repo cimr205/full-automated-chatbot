@@ -262,6 +262,7 @@ def score_signal(
     ohlcv_15m: list | None = None,   # 15-minute data for entry timing + Asian range
     at:        datetime | None = None,   # backtesting: pass the candle's own timestamp
     min_confluence: float | None = None,  # per-symbol overrides (see market_monitor.SYMBOL_OVERRIDES)
+    min_confluence_short: float | None = None,  # extra bar for shorts against a dominant uptrend
     atr_sl_mult:    float | None = None,
     atr_tp_mult:    float | None = None,
     min_rr:         float | None = None,
@@ -313,6 +314,13 @@ def score_signal(
     else:
         return {**no_signal, "reasons": [f"1h neutral og ingen højere tidsramme tilgængelig {tf_directions}"],
                 "tf_directions": tf_directions}
+
+    # Shorts against a dominant uptrend are structurally harder to win (gold's
+    # bearish setups measurably underperform its bullish ones live) — allow a
+    # stricter confluence bar for shorts specifically, same idea as GBPJPY's
+    # flat higher bar for both directions.
+    if direction == "short" and min_confluence_short is not None:
+        min_confluence = min_confluence_short
 
     total_w   = sum(weights)
     conf_sum  = sum(s["confidence"] * w for s, w in zip(scores, weights)

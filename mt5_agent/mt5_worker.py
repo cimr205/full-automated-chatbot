@@ -237,6 +237,36 @@ def mt5_check_pending(order_ticket: int) -> dict:
     return {"status": "unknown"}
 
 
+def mt5_get_position_history(ticket: int) -> dict:
+    """Real closing price/profit for a position ticket, pulled from MT5's own
+    deal history. Used when a position we tracked as open turns out to be
+    gone from MT5 (closed manually, by another EA, or by a prop-firm rule) —
+    previously reconciliation just guessed the entry price as the exit,
+    recording every such trade as a flat 0R regardless of its real outcome."""
+    if not MT5_AVAILABLE:
+        return {"error": "MetaTrader5 ikke installeret"}
+    if not _initialize():
+        return {"error": f"MT5 initialize fejlede: {mt5.last_error()}"}
+
+    deals = mt5.history_deals_get(position=ticket)
+    mt5.shutdown()
+    if not deals:
+        return {"error": "Ingen deal-historik fundet for denne position"}
+
+    out_deals = [d for d in deals if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY)]
+    if not out_deals:
+        return {"error": "Position fremgår ikke som lukket i MT5-historikken endnu"}
+
+    last_deal = max(out_deals, key=lambda d: d.time)
+    total_profit = sum(d.profit + d.swap + d.commission for d in out_deals)
+    return {
+        "closed":     True,
+        "exit_price": last_deal.price,
+        "profit":     round(total_profit, 2),
+        "closed_at":  last_deal.time,
+    }
+
+
 def mt5_cancel_pending(order_ticket: int) -> dict:
     if not MT5_AVAILABLE:
         return {"error": "MetaTrader5 ikke installeret"}
@@ -566,6 +596,15 @@ async def handle_command(cmd: dict, redis: aioredis.Redis):
         payload = {
             "trade_id": trade_id,
             "command":  "get_open_positions",
+            "result":   result,
+            "ts":       datetime.utcnow().isoformat(),
+        }
+
+    elif command == "get_position_history" and ticket:
+        result  = mt5_get_position_history(int(ticket))
+        payload = {
+            "trade_id": trade_id,
+            "command":  "get_position_history",
             "result":   result,
             "ts":       datetime.utcnow().isoformat(),
         }

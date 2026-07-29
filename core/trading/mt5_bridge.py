@@ -79,7 +79,8 @@ class MT5Bridge:
 
                     elif command in ("get_account_info", "get_symbol_info", "get_tick",
                                      "check_pending", "cancel_pending", "get_rates",
-                                     "modify_trade", "get_open_positions"):
+                                     "modify_trade", "get_open_positions",
+                                     "get_position_history"):
                         trade_id = data.get("trade_id")
                         result   = data.get("result", {})
                         if trade_id and trade_id in self._pending:
@@ -254,6 +255,23 @@ class MT5Bridge:
 
         try:
             return await asyncio.wait_for(fut, timeout=15)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            return {"error": "timeout"}
+
+    async def get_position_history(self, ticket: int) -> dict:
+        """Real closing price/profit for a ticket from MT5's own deal history —
+        used to reconcile positions closed outside our own SL/TP logic."""
+        req_id = f"hist_{uuid.uuid4().hex[:8]}"
+        cmd = {"command": "get_position_history", "trade_id": req_id, "ticket": ticket,
+               "ts": datetime.utcnow().isoformat()}
+
+        fut = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = fut
+        await self._redis.publish("trading:mt5:commands", json.dumps(cmd))
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             return {"error": "timeout"}
