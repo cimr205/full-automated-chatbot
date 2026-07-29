@@ -409,6 +409,7 @@ class MarketMonitor:
             stop_loss=signal["stop_loss"],
             take_profit=signal["take_profit"],
             partial_tp=signal.get("partial_tp", 0),
+            size=volume or 0,
             signal_data=signal,
             source="auto",
             order_type=order_type,

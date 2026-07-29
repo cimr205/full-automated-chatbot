@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 POSITIONS_KEY  = "trading:positions"          # Redis hash: trade_id → JSON
 HISTORY_KEY    = "trading:trade_history"      # Redis list: closed trades
 MONITOR_INTERVAL = 60                          # seconds between price checks
+PARTIAL_CLOSE_FRACTION = 0.5    # fraction of the position actually banked at the 1.5R partial level
+MIN_CLOSE_VOLUME       = 0.01   # broker's typical minimum lot — below this a partial split isn't possible
 
 
 class PositionManager:
@@ -55,6 +57,11 @@ class PositionManager:
             "direction":  direction,
             "entry":      entry,
             "stop_loss":  stop_loss,
+            # Immutable copy of the opening stop — "stop_loss" above gets moved
+            # to breakeven on partial-profit, and R-multiple math must always
+            # be against the ORIGINAL risk distance, not whatever the live
+            # protective stop currently sits at (see close_trade()).
+            "initial_stop_loss": stop_loss,
             "take_profit": take_profit,
             "partial_tp": partial_tp,
             "size":       size,
@@ -91,13 +98,30 @@ class PositionManager:
             return None
         trade = json.loads(raw)
         entry = trade["entry"]
-        sl    = trade["stop_loss"]
+        # Original risk distance, not the live stop (which partial-profit moves
+        # to breakeven — using that here would make risk=0 and misreport every
+        # trade that reached breakeven as a flat 0R regardless of where it
+        # actually closed).
+        sl    = trade.get("initial_stop_loss", trade["stop_loss"])
         risk  = abs(entry - sl)
 
         if trade["direction"] == "long":
-            pnl_r = (exit_price - entry) / risk if risk else 0
+            final_leg_r = (exit_price - entry) / risk if risk else 0
         else:
-            pnl_r = (entry - exit_price) / risk if risk else 0
+            final_leg_r = (entry - exit_price) / risk if risk else 0
+
+        # If a real partial close already banked profit at the 1.5R level,
+        # blend it with the remainder's final result, weighted by volume —
+        # otherwise a runner that gives back to breakeven erases the real,
+        # already-realized gain from the partial.
+        partial_vol = trade.get("partial_closed_volume") or 0
+        original_size = trade.get("size") or 0
+        if partial_vol and original_size:
+            partial_frac   = min(partial_vol / original_size, 1.0)
+            remainder_frac = 1 - partial_frac
+            pnl_r = partial_frac * trade["partial_closed_r"] + remainder_frac * final_leg_r
+        else:
+            pnl_r = final_leg_r
 
         closed_at = datetime.utcnow()
         opened_ts = trade.get("filled_at") or trade.get("opened_at")
@@ -320,15 +344,66 @@ class PositionManager:
             await self._notify_close(closed, "🎯 Take Profit ramt")
             return
 
-        # Partial profit level hit — move SL to breakeven on MT5 FIRST, only mark
-        # it done locally once the broker actually confirms it. Marking it done
-        # unconditionally (as this used to) meant a failed broker-side move still
-        # looked successful in every notification and record, while the real
-        # position kept its original stop — silently leaving full risk on the
-        # table exactly when the trade looked protected. Leaving partial_taken
-        # False on failure means this retries automatically next check cycle
-        # (price is still past the partial level), instead of giving up for good.
+        # Partial profit level hit. Two things happen, in order:
+        # 1) Actually bank real profit: close half the position on MT5 at the
+        #    current price. This used to ONLY move the stop to breakeven and
+        #    leave 100% of the size riding toward the (often far, sometimes
+        #    never-reached) full target — so a trade that went the right
+        #    direction but never reached the full TP banked nothing and often
+        #    ended up back at breakeven for a real 0R result. Closing half here
+        #    means the 1.5R is real money regardless of what the runner does.
+        # 2) Move SL to breakeven on the remainder, same as before.
+        # Both are attempted independently — a partial-close failure (e.g. the
+        # position is already at the broker's minimum lot and can't be split)
+        # must not block the breakeven protection, and vice versa.
         if partial_hit:
+            # Guard on partial_closed_volume specifically, not partial_taken —
+            # partial_taken also covers the breakeven move below, and the two
+            # can succeed/fail independently across retries. Using partial_taken
+            # here would re-close another half of an already-halved position
+            # if the close succeeded on one cycle but the breakeven move
+            # failed and got retried on the next.
+            if trade.get("partial_closed_volume") is None:
+                partial_volume = 0.0
+                close_result = {"error": "MT5 bridge ikke tilgængelig"}
+                if self._mt5:
+                    try:
+                        ticket_raw = await self._redis.hget("trading:mt5:tickets", trade_id)
+                        ticket = json.loads(ticket_raw).get("ticket") if ticket_raw else None
+                        positions = await self._mt5.get_open_positions()
+                        live_vol = next(
+                            (p.get("volume") for p in positions.get("positions", [])
+                             if p.get("ticket") == ticket),
+                            None,
+                        )
+                        if live_vol:
+                            partial_volume = round(live_vol * PARTIAL_CLOSE_FRACTION, 2)
+                            if MIN_CLOSE_VOLUME <= partial_volume < live_vol:
+                                close_result = await self._mt5.send_close(
+                                    trade_id=trade_id, symbol=trade["symbol"],
+                                    direction=direction, volume=partial_volume,
+                                )
+                            else:
+                                close_result = {"error": f"partial volume {partial_volume} ikke splitbar (live={live_vol})"}
+                    except Exception as e:
+                        close_result = {"error": str(e)}
+
+                if "error" not in close_result:
+                    trade["partial_closed_volume"] = partial_volume
+                    trade["partial_closed_r"] = PARTIAL_R
+                    # Persist immediately — this must survive even if the
+                    # breakeven move below fails, so a retry next cycle never
+                    # re-closes another half of the already-halved position.
+                    await self._redis.hset(POSITIONS_KEY, trade_id, json.dumps(trade))
+                    await self._notify(
+                        f"💰 *Delvis profit hjemtaget* — {trade['symbol']}\n"
+                        f"Lukkede {partial_volume} lots @ 1.5R (`{price:,.2f}`), "
+                        f"resten kører videre mod fuldt target."
+                    )
+                    log.info("[%s] Real partial close: %s lots @ %s", trade["symbol"], partial_volume, price)
+                else:
+                    log.info("[%s] Partial close skipped/failed (%s) — breakeven-only", trade["symbol"], close_result["error"])
+
             mod_result = {"error": "MT5 bridge ikke tilgængelig"}
             if self._mt5:
                 try:
