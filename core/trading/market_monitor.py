@@ -654,34 +654,32 @@ class MarketMonitor:
             discrepancies = 0
 
             # 1. Redis records that no longer exist on MT5 → mark closed.
-            # Pull the real closing price from MT5's own deal history instead
-            # of guessing the entry price — the old placeholder recorded every
-            # externally-closed trade as a flat 0R regardless of its actual
-            # outcome, which silently corrupted win-rate stats and learning
-            # (a real win closed outside the bot's own SL/TP could never
-            # register as a win).
+            # NOTE: previously tried self.mt5.get_position_history(ticket) here
+            # to pull the real close price/P&L (2026-07-29, commit 649e3bc),
+            # but on this account's mt5linux/RPyC bridge, mt5.history_deals_get()
+            # doesn't error — it hangs indefinitely, wedging the whole worker
+            # process (confirmed live 2026-07-30: no command of any kind, not
+            # even ping, got a response for 2+ minutes until mt5-agent was
+            # restarted). That's worse than an inaccurate placeholder — a
+            # hung worker means NO position monitoring at all, on whatever
+            # else happens to be open at the time. Reverted to the placeholder
+            # until a bridge that actually supports deal history is in place;
+            # every closed_externally trade's true P&L still needs a manual
+            # check in the MT5 terminal, same as before.
             for ticket, trade in redis_by_ticket.items():
                 if ticket not in mt5_by_ticket:
                     discrepancies += 1
                     log.warning("Reconcile: trade %s (ticket %s) not on MT5 — marking closed",
                                 trade["trade_id"], ticket)
-                    hist = await self.mt5.get_position_history(ticket)
-                    exit_price = hist.get("exit_price") if "error" not in hist else None
-                    known = exit_price is not None
                     closed = await self.positions.close_trade(
-                        trade["trade_id"], exit_price if known else trade["entry"],
-                        reason="closed_externally"
+                        trade["trade_id"], trade["entry"], reason="closed_externally"
                     )
                     if closed:
-                        detail = (f"Reel lukkepris: `{exit_price:,.2f}`, P&L: {hist.get('profit', 0):+.2f}"
-                                  if known else
-                                  "Kunne ikke finde den reelle lukkepris i MT5-historikken — "
-                                  "tjek terminalen manuelt.")
                         await self._notify(
                             f"⚠️ *Position afstemning*\n"
                             f"`{trade['symbol']}` {trade['direction'].upper()} "
-                            f"(ticket {ticket}) eksisterer ikke på MT5 — markeret som lukket.\n"
-                            f"{detail}"
+                            f"(ticket {ticket}) eksisterer ikke på MT5 — "
+                            f"markeret som lukket. Tjek terminalen for den reelle lukkepris og P&L."
                         )
 
             # 2. MT5 positions we have no Redis record for → re-register
