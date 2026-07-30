@@ -35,10 +35,14 @@ _cache: dict = {"events": None, "fetched_at": None}
 _CACHE_TTL = 3600   # re-fetch at most once per hour
 
 
-async def is_blocked_by_news() -> tuple[bool, str]:
+async def is_blocked_by_news() -> tuple[bool, str, str]:
     """
-    Returns (blocked, reason). Non-blocking: if the calendar can't be
-    fetched, returns (False, "") so trading isn't prevented by a network error.
+    Returns (blocked, reason, event_key). event_key is stable across the
+    whole block window (just the event title) — reason includes a live
+    "N min" countdown that changes every call, so callers that want to
+    debounce repeated notifications must dedupe on event_key, not reason.
+    Non-blocking: if the calendar can't be fetched, returns (False, "", "")
+    so trading isn't prevented by a network error.
     """
     try:
         events = await _get_events()
@@ -56,10 +60,10 @@ async def is_blocked_by_news() -> tuple[bool, str]:
                 return True, (
                     f"Nyheds-filter: *{title}* {direction} {abs(delta_min)} min. "
                     f"Ingen trade 45 min ±. Prøver igen bagefter."
-                )
+                ), title
     except Exception as e:
         log.warning("News filter error (failing open): %s", e)
-    return False, ""
+    return False, "", ""
 
 
 async def next_event_description() -> str:

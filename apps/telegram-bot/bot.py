@@ -454,7 +454,7 @@ async def cmd_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # ── News filter status ────────────────────────────────────────────────
         try:
-            news_blocked, news_reason = await news_filter.is_blocked_by_news()
+            news_blocked, news_reason, _ = await news_filter.is_blocked_by_news()
             if news_blocked:
                 lines.append(f"📰 {news_reason}\n")
             else:

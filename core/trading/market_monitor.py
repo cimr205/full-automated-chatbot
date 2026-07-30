@@ -291,10 +291,10 @@ class MarketMonitor:
             return
 
         # News filter — no trading 45 min around high-impact USD/Gold events
-        news_blocked, news_reason = await news_filter.is_blocked_by_news()
+        news_blocked, news_reason, news_event = await news_filter.is_blocked_by_news()
         if news_blocked:
             log.info("[%s] News filter: %s", symbol, news_reason)
-            await self._notify(f"📰 {news_reason}")
+            await self._notify_block(symbol, news_reason, dedupe_key=f"news:{news_event}")
             return
 
         # Risk gate — never open a new trade while paused or locked
@@ -726,16 +726,21 @@ class MarketMonitor:
             "message": message, "parse_mode": "Markdown", "task_id": "market_monitor",
         }))
 
-    async def _notify_block(self, symbol: str, reason: str):
+    async def _notify_block(self, symbol: str, reason: str, dedupe_key: str | None = None):
         """Tell the user why a scan didn't lead to a trade. Debounced per
         symbol so an unchanged reason (still locked, still low confidence,
-        still neutral) sends once, not every 15-min cycle — but any change
-        in reason, or a fresh problem, always gets a fresh message."""
+        still neutral) sends once, not every scan cycle — but any change
+        in reason, or a fresh problem, always gets a fresh message.
+        dedupe_key lets a caller dedupe on something coarser than the exact
+        reason text — e.g. the news filter's reason includes a live "N min"
+        countdown that changes every call, which would defeat a plain text
+        comparison and spam a fresh message every single scan."""
         key  = f"trading:last_block_reason:{symbol}"
+        compare_value = dedupe_key if dedupe_key is not None else reason
         last = await self._redis.get(key)
-        if last == reason:
+        if last == compare_value:
             return
-        await self._redis.set(key, reason, ex=86400)
+        await self._redis.set(key, compare_value, ex=86400)
         await self._notify(f"⏸️ *{symbol}*: {reason}")
 
     async def _journal(self, symbol: str, market: str, signal: dict, published: bool):
