@@ -582,6 +582,21 @@ async def get_lessons():
     return await trading_learning.all_stats(redis_client)
 
 
+@app.get("/trading/_debug/position_history/{trade_id}")
+async def debug_position_history(trade_id: str):
+    """Temporary diagnostic: test whether get_position_history actually works
+    against this broker bridge (mt5linux vs native), independent of the
+    reconciliation flow. Remove once we know."""
+    if not market_monitor:
+        raise HTTPException(503, "Market monitor not running")
+    ticket_raw = await redis_client.hget("trading:mt5:tickets", trade_id)
+    if not ticket_raw:
+        return {"error": "no ticket found for this trade_id"}
+    ticket = json.loads(ticket_raw).get("ticket")
+    result = await market_monitor.mt5.get_position_history(ticket)
+    return {"ticket": ticket, "result": result}
+
+
 @app.post("/trading/learning/unblock")
 async def unblock_learning(setup: str, symbol: str | None = None, reset_counts: bool = False):
     """Manually lift a learning block. Use reset_counts=true when the losing
