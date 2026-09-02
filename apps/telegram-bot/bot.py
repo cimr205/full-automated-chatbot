@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from core.memory.brain import Brain
 from core.memory.vault import SecureVault
-from core.trading.market_monitor import MarketMonitor
+from core.trading.market_monitor import MarketMonitor, DAILY_TRADE_CAP
 from core.trading import learning as trading_learning
 from core.trading import retrospective as trading_retrospective
 
@@ -95,16 +95,24 @@ async def _send_photo_or_text(bot, chat_id: int, photo_path: str, caption: str):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
+    mode = "📝 PAPER TRADING" if market_monitor and market_monitor._paper_mode else "🔴 LIVE"
     await update.message.reply_text(
-        "🥇 *XAUUSD Trading Bot*\n\n"
+        "📈 *Forex + Gold Trading Bot* — " + mode + "\n\n"
         "*Bare skriv til mig — AI forstår naturligt sprog.*\n\n"
-        "*📊 Trading (Gold only — 1 trade/dag)*\n"
+        f"*📊 Trading (Forex + XAUUSD — {DAILY_TRADE_CAP} trade/dag)*\n"
         "/market — dagsoverblik: Asian range, nyheder, slot-status\n"
+        "/watchlist — vis/rediger forex- og guld-listen\n"
         "/trades — åbne trades + statistik\n"
-        "/trade XAUUSD long ENTRY sl=X tp=Y — log trade manuelt\n"
+        "/trade EURUSD long ENTRY sl=X tp=Y — log trade manuelt\n"
         "/close <id> [pris] — luk trade\n"
         "/why <id> — grundlag for trade\n"
         "/scan — scan markedet NU\n"
+        "/chart — watchlist-overblik som billede\n"
+        "/risk — equity, drawdown, lås-status\n"
+        "/unlock_risk — fjern risk-lås efter gennemgang\n"
+        "/trading_pause / /trading_resume — sæt auto-trading på pause\n"
+        "/report [daily|weekly] — performance-rapport\n"
+        "/backtest <symbol> — mål historisk win rate\n"
         "/lektioner — fuld retrospektiv analyse\n"
         "/lessons — win rate per setup-type\n\n"
         "*Opgaver & Mål*\n"
