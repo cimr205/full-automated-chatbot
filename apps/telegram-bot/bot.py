@@ -592,9 +592,13 @@ async def cmd_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             status_line = "✅ Aktiv"
         currency = s.get("currency", "?")
         currency_warn = "" if currency == "DKK" else f"\n⚠️ Konto-valuta er `{currency}`, ikke DKK — 100-kr loftet gælder i {currency}, ikke nødvendigvis danske kroner."
+        mode_line = ("📝 *PAPER TRADING* — ingen rigtige ordrer sendes (LIVE_TRADING=false)"
+                     if market_monitor._paper_mode else
+                     "🔴 *LIVE* — rigtige ordrer sendes til MT5")
         msg = (
             f"📐 *Risk-status*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{mode_line}\n"
             f"Status: {status_line}\n"
             f"Konto-valuta: `{currency}`{currency_warn}\n\n"
             f"💰 Equity: `{s.get('equity', 0):,.2f}`\n"
@@ -654,7 +658,7 @@ async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ Backtester {symbol} mod ~2 års historik — kan tage et minut...")
     try:
         from core.trading.backtest import run_backtest
-        result = await run_backtest(symbol)
+        result = await run_backtest(market_monitor.mt5, symbol)
         if "error" in result:
             await update.message.reply_text(f"Fejl: {result['error']}")
             return
@@ -683,7 +687,7 @@ async def cmd_seed_learning(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         stocks_raw = await redis_client.get("trading:watchlist:stocks")
         symbols = (forex_raw or ",".join(DEFAULT_FOREX)).split(",") + \
                   (stocks_raw or ",".join(DEFAULT_STOCKS)).split(",")
-        results = await seed_learning(redis_client, [s.strip() for s in symbols if s.strip()])
+        results = await seed_learning(redis_client, market_monitor.mt5, [s.strip() for s in symbols if s.strip()])
         await update.message.reply_text(f"✅ Forhåndsudfyldt med historik fra {len(results)} symboler. Se /lessons.")
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
@@ -702,7 +706,7 @@ async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "_Rør ikke ved risikostyringen — kun signal-tærskler testes._",
             parse_mode="Markdown"
         )
-        asyncio.create_task(run_sweep())
+        asyncio.create_task(run_sweep(market_monitor.mt5))
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
 
@@ -762,10 +766,11 @@ async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sl = fmt(t.get("stop_loss", 0))
             tp = fmt(t.get("take_profit", 0))
             src = "🤖" if t.get("source") == "auto" else "👤"
+            paper_tag = " 📝PAPER" if t.get("paper") else ""
             status_tag = "⏳ AFVENTER (limit)" if t.get("status") == "pending" else ""
             cancel_hint = f"\n  _Annuller: /cancel {t['trade_id']}_" if t.get("status") == "pending" else ""
             lines.append(
-                f"{src}{d} *{sym}* `{t['trade_id']}` {status_tag}\n"
+                f"{src}{d} *{sym}*{paper_tag} `{t['trade_id']}` {status_tag}\n"
                 f"  Entry: `{entry}` | SL: `{sl}` | TP: `{tp}`\n"
                 f"  Åbnet: {t.get('opened_at','')[:16]}{cancel_hint}"
             )

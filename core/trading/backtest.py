@@ -59,12 +59,20 @@ def _simulate_exit(ohlcv: list, start_idx: int, direction: str,
     return None
 
 
-def simulate(ohlcv: list, confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
+def simulate(ohlcv: list, ohlcv_15m: list | None = None, symbol: str = "",
+             confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
     """
     The actual backtest loop, separated from data-fetching so a parameter
     sweep (see optimize.py) can fetch each symbol's history once and replay
-    it many times with different thresholds — without re-hitting Yahoo
-    Finance for every combination.
+    it many times with different thresholds — without re-hitting the
+    broker for every combination.
+
+    `ohlcv_15m`, if supplied, lets gold's Asian Range Sweep / confluence
+    checks (which need 15m data) actually fire during backtests instead of
+    silently never triggering — they were previously untestable here since
+    this function never received 15m candles at all. Each step slices
+    ohlcv_15m to bars at-or-before the current 1h candle's own close, so no
+    future 15m data leaks into a signal being scored "as of" an earlier time.
     """
     by_setup = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
     overall  = {"wins": 0, "losses": 0, "total_r": 0.0, "skipped_no_exit": 0}
@@ -73,7 +81,14 @@ def simulate(ohlcv: list, confidence_thresh: float = CONFIDENCE_THRESH) -> dict:
     while i < len(ohlcv) - 1:
         window = ohlcv[max(0, i - WINDOW):i + 1]
         candle_time = datetime.fromtimestamp(window[-1][0] / 1000, tz=timezone.utc)
-        signal = score_signal(window, _resample_4h(window), None, at=candle_time)
+
+        window_15m = None
+        if ohlcv_15m:
+            cutoff_ms = window[-1][0] + 3600_000   # this 1h candle's own close
+            window_15m = [c for c in ohlcv_15m if c[0] <= cutoff_ms][-500:]
+
+        signal = score_signal(window, _resample_4h(window), None, ohlcv_15m=window_15m,
+                               at=candle_time, symbol=symbol)
 
         if (signal["direction"] != "neutral" and signal.get("checklist_ok")
                 and signal["confidence"] >= confidence_thresh):
@@ -115,7 +130,8 @@ async def run_backtest(mt5_bridge, symbol: str, count: int = 5000,
     ohlcv = await fetch_history(mt5_bridge, symbol, "1h", count)
     if len(ohlcv) < WINDOW + 10:
         return {"error": f"Ikke nok historik for {symbol} ({len(ohlcv)} candles) — er MT5 Worker online?"}
-    result = simulate(ohlcv, confidence_thresh=confidence_thresh)
+    ohlcv_15m = await fetch_history(mt5_bridge, symbol, "15m", count * 4)
+    result = simulate(ohlcv, ohlcv_15m=ohlcv_15m, symbol=symbol, confidence_thresh=confidence_thresh)
     return {"symbol": symbol, "candles": len(ohlcv), **result}
 
 

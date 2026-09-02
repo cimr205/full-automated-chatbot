@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import redis.asyncio as aioredis
 
 from . import learning, retrospective
+from .signal_engine import PARTIAL_R
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class PositionManager:
         source:     str     = "auto",   # "auto" | "manual"
         order_type: str     = "market", # "market" | "limit"
         trade_id:   str     = None,     # supply when MT5 needs the same ID for correlation
+        paper:      bool    = False,    # True = simulated fill (LIVE_TRADING=false) -- no real broker position exists
     ) -> str:
         trade_id = trade_id or f"trade_{uuid.uuid4().hex[:8]}"
         trade = {
@@ -55,6 +57,7 @@ class PositionManager:
             "symbol":     symbol,
             "market":     market,
             "direction":  direction,
+            "paper":      paper,
             "entry":      entry,
             "stop_loss":  stop_loss,
             # Immutable copy of the opening stop — "stop_loss" above gets moved
@@ -366,7 +369,12 @@ class PositionManager:
             if trade.get("partial_closed_volume") is None:
                 partial_volume = 0.0
                 close_result = {"error": "MT5 bridge ikke tilgængelig"}
-                if self._mt5:
+                if trade.get("paper"):
+                    # No real broker position exists for a paper trade -- simulate
+                    # the partial close locally instead of calling MT5 at all.
+                    partial_volume = round((trade.get("size") or 1.0) * PARTIAL_CLOSE_FRACTION, 2)
+                    close_result = {"paper": True}
+                elif self._mt5:
                     try:
                         ticket_raw = await self._redis.hget("trading:mt5:tickets", trade_id)
                         ticket = json.loads(ticket_raw).get("ticket") if ticket_raw else None
@@ -405,7 +413,11 @@ class PositionManager:
                     log.info("[%s] Partial close skipped/failed (%s) — breakeven-only", trade["symbol"], close_result["error"])
 
             mod_result = {"error": "MT5 bridge ikke tilgængelig"}
-            if self._mt5:
+            if trade.get("paper"):
+                # Same reasoning as the partial close above -- nothing real to
+                # modify on a broker, the breakeven move is purely local bookkeeping.
+                mod_result = {"paper": True}
+            elif self._mt5:
                 try:
                     mod_result = await self._mt5.modify_trade(
                         trade_id=trade_id,

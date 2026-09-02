@@ -39,15 +39,40 @@ DAILY_TRADE_CAP    = int(os.getenv("DAILY_TRADE_CAP", "1"))   # max qualifying t
 
 # ── Default watchlists ────────────────────────────────────────────────────────
 
-# XAUUSD only — one market, master it.
-# GC=F is the Yahoo Finance ticker for Gold futures (closest to XAUUSD spot).
-# MT5 uses XAUUSD — see MT5_SYMBOL_MAP below.
-DEFAULT_FOREX  = ["GC=F"]
+# Forex majors (spec: EURUSD/GBPUSD/USDJPY/AUDUSD/USDCHF/USDCAD/NZDUSD) plus
+# gold (GC=F, Yahoo's Gold futures ticker, closest to XAUUSD spot). Each
+# symbol independently gets FOREX_PROFILE or GOLD_PROFILE from
+# core/trading/engine/config.get_profile() purely by its own ticker name —
+# scanning them in the same loop never mixes the two profiles' weights,
+# thresholds, or session rules; a symbol only ever "sees" its own profile.
+DEFAULT_FOREX = [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCHF=X", "USDCAD=X", "NZDUSD=X",
+    "GC=F",
+]
 DEFAULT_STOCKS = []
 
-# Map Yahoo tickers to MT5 symbol names
+# Map Yahoo tickers to MT5 broker symbol names (mirrors mt5_agent/mt5_worker.py's
+# own SYMBOL_MAP on the other end of the Redis command/result protocol).
 MT5_SYMBOL_MAP = {
+    "EURUSD=X": "EURUSD",
+    "GBPUSD=X": "GBPUSD",
+    "USDJPY=X": "USDJPY",
+    "AUDUSD=X": "AUDUSD",
+    "USDCHF=X": "USDCHF",
+    "USDCAD=X": "USDCAD",
+    "NZDUSD=X": "NZDUSD",
+    "GBPJPY=X": "GBPJPY",
+    "EURGBP=X": "EURGBP",
+    "EURJPY=X": "EURJPY",
+    "AUDJPY=X": "AUDJPY",
+    "NZDJPY=X": "NZDJPY",
+    "EURAUD=X": "EURAUD",
+    "GBPAUD=X": "GBPAUD",
+    "AUDNZD=X": "AUDNZD",
+    "CHFJPY=X": "CHFJPY",
+    "CADJPY=X": "CADJPY",
     "GC=F": "XAUUSD",
+    "SI=F": "XAGUSD",
 }
 
 # Per-symbol parameter overrides derived from backtesting + known pair characteristics.
@@ -114,8 +139,15 @@ class MarketMonitor:
         self._mt5_offline_since: float | None = None   # timestamp when MT5 first went offline
         self.positions = PositionManager(redis)
         self.mt5       = MT5Bridge(redis)
-        self.positions._mt5 = self.mt5   # inject for auto-breakeven
+        self.positions._mt5 = self.mt5   # inject for auto-breakeven (real price data regardless of paper/live)
         self.risk      = RiskManager(redis, db=db)
+
+        # LIVE_TRADING=false (default) -> every new trade is a simulated paper
+        # fill using real MT5 market data; no order is ever sent to the broker.
+        # See core/trading/engine/execution.py and engine/config.LIVE_TRADING.
+        from .engine import execution as _execution
+        self.execution = _execution.get_execution(self.mt5, redis)
+        self._paper_mode = not _execution.LIVE_TRADING
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -245,12 +277,22 @@ class MarketMonitor:
         signal = score_signal(
             ohlcv_1h, ohlcv_4h, ohlcv_1d,
             ohlcv_15m=ohlcv_15m,
+            symbol=symbol,   # selects FOREX_PROFILE vs GOLD_PROFILE (core/trading/engine/config.py)
             min_confluence=overrides.get("min_confluence"),
             min_confluence_short=overrides.get("min_confluence_short"),
             atr_sl_mult=overrides.get("atr_sl_mult"),
             atr_tp_mult=overrides.get("atr_tp_mult"),
             min_rr=overrides.get("min_rr"),
         )
+
+        from .engine.decision_log import log_decision, persist_decision
+        decision_record = log_decision(
+            "trade_candidate" if signal["direction"] != "neutral" else "no_trade",
+            symbol, signal.get("signal", {}).get("profile", "forex"),
+            {"direction": signal["direction"], "confidence": signal["confidence"],
+             "setups": signal.get("setups"), "reasons": signal.get("reasons")},
+        )
+        await persist_decision(self._redis, decision_record)
 
         # Annotate signal with MT5 symbol name (may differ from Yahoo ticker)
         mt5_sym = MT5_SYMBOL_MAP.get(symbol, symbol)
@@ -302,6 +344,24 @@ class MarketMonitor:
         if not can_trade:
             log.info("[%s] Skipped — %s", symbol, lock_reason)
             await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men risk-gate: {lock_reason}")
+            return
+
+        # Correlation / exposure gate — reject if this trade would stack too
+        # much net risk in one currency, open too many simultaneous
+        # positions, or (gold only) too many stacked XAU positions (spec
+        # section 17). Additive to the equity-based risk gate above, not a
+        # replacement for it.
+        from .engine import risk_exposure
+        from .engine.config import get_profile as _get_profile
+        open_positions = await self.positions.list_open()
+        ok, exposure_reason = risk_exposure.check_position_limits(open_positions, symbol)
+        if ok:
+            ok, exposure_reason = risk_exposure.check_correlation(open_positions, symbol, direction)
+        if ok and _get_profile(symbol).name == "gold":
+            ok, exposure_reason = risk_exposure.check_xau_exposure(open_positions, adding=True)
+        if not ok:
+            log.info("[%s] Correlation/exposure gate: %s", symbol, exposure_reason)
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men {exposure_reason}")
             return
 
         # Learning gate — setups with a clearly bad real track record are blocked
@@ -382,7 +442,7 @@ class MarketMonitor:
             volume = await self._sized_volume(mt5_sym, signal["price"], signal["stop_loss"])
             if volume is None:
                 log.warning("[%s] Volume sizing unavailable — using default lot", mt5_sym)
-            mt5_result = await self.mt5.send_open(
+            mt5_result = await self.execution.place_order(
                 trade_id=trade_id,
                 symbol=mt5_sym,
                 direction=direction,
@@ -396,17 +456,17 @@ class MarketMonitor:
             mt5_result = {"error": str(e)}
 
         if "error" in mt5_result:
-            log.warning("MT5 execution failed: %s", mt5_result["error"])
+            log.warning("Execution failed (paper=%s): %s", self._paper_mode, mt5_result["error"])
             await self._notify_mt5_not_executed(
-                symbol, signal, f"MT5 afviste ordren: {mt5_result['error']}"
+                symbol, signal, f"Ordre afvist: {mt5_result['error']}"
             )
             await self._journal(symbol, market, signal, published=False)
             return
 
-        log.info("MT5 order placed: ticket=%s vol=%s type=%s",
-                 mt5_result.get("ticket"), volume, order_type)
+        log.info("%s order placed: ticket=%s vol=%s type=%s",
+                 "PAPER" if self._paper_mode else "MT5", mt5_result.get("ticket"), volume, order_type)
 
-        # Only now — confirmed real execution — record it and notify.
+        # Only now — confirmed (real or paper) execution — record it and notify.
         await self.positions.open_trade(
             symbol=symbol, market=market,
             direction=direction,
@@ -415,6 +475,7 @@ class MarketMonitor:
             take_profit=signal["take_profit"],
             partial_tp=signal.get("partial_tp", 0),
             size=volume or 0,
+            paper=self._paper_mode,
             signal_data=signal,
             source="auto",
             order_type=order_type,
