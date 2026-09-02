@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone, time as dtime
@@ -315,7 +316,14 @@ class MarketMonitor:
 
         if direction == "neutral":
             reason = "; ".join(signal.get("reasons") or []) or "Ingen klar retning lige nu."
-            await self._notify_block(symbol, f"Neutral — {reason}")
+            # Reasons often embed a live number (ATR percentile, R:R ratio,
+            # score) that shifts slightly every scan -- e.g. "R:R 0.52 under
+            # minimum 2.0" vs "R:R 0.69 under minimum 2.0" are the same
+            # underlying situation. Strip digits so the dedupe key reflects
+            # the STABLE shape of the reason, not its exact numbers, or this
+            # sends a fresh message every single scan cycle.
+            stable_key = re.sub(r"[\d.]+", "#", reason)
+            await self._notify_block(symbol, f"Neutral — {reason}", dedupe_key=f"neutral:{stable_key}")
             return
 
         # Pre-trade checklist — all hard checks must pass
@@ -323,13 +331,15 @@ class MarketMonitor:
             checklist = signal.get("checklist", {})
             failed = [k for k, v in checklist.items() if not v]
             log.info("[%s] Checklist failed: %s", symbol, failed)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men checklist fejlede: {', '.join(failed)}")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men checklist fejlede: {', '.join(failed)}",
+                                      dedupe_key=f"checklist:{','.join(failed)}")
             return
 
         conf_thresh = overrides.get("confidence_thresh", CONFIDENCE_THRESH)
         if confidence < conf_thresh:
             log.debug("[%s] Confidence too low: %.0f%% (need %.0f%%)", symbol, confidence * 100, conf_thresh * 100)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men under confidence-grænsen ({conf_thresh:.0%}).")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men under confidence-grænsen ({conf_thresh:.0%}).",
+                                      dedupe_key=f"low_confidence:{direction}")
             return
 
         # News filter — no trading 45 min around high-impact USD/Gold events
@@ -343,7 +353,8 @@ class MarketMonitor:
         can_trade, lock_reason = await self.risk.check_can_trade()
         if not can_trade:
             log.info("[%s] Skipped — %s", symbol, lock_reason)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men risk-gate: {lock_reason}")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men risk-gate: {lock_reason}",
+                                      dedupe_key=f"risk_gate:{lock_reason}")
             return
 
         # Correlation / exposure gate — reject if this trade would stack too
@@ -361,7 +372,8 @@ class MarketMonitor:
             ok, exposure_reason = risk_exposure.check_xau_exposure(open_positions, adding=True)
         if not ok:
             log.info("[%s] Correlation/exposure gate: %s", symbol, exposure_reason)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men {exposure_reason}")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men {exposure_reason}",
+                                      dedupe_key=f"exposure:{exposure_reason}")
             return
 
         # Learning gate — setups with a clearly bad real track record are blocked
@@ -369,20 +381,23 @@ class MarketMonitor:
         setup_type = signal.get("setup_type")
         if await learning.is_blocked(self._redis, setup_type, symbol=symbol):
             log.info("[%s] Setup '%s' is blocked by learning — skipping", symbol, setup_type)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men setup '{setup_type}' er blokeret af learning (dårlig historisk win rate).")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men setup '{setup_type}' er blokeret af learning (dårlig historisk win rate).",
+                                      dedupe_key=f"learning_blocked:{setup_type}")
             return
 
         # Borderline confidence — don't act on a single read. Require the
         # *next* scan to reproduce the same direction + setup before entering.
         if not await self._confirmed(symbol, direction, setup_type, confidence):
             log.info("[%s] Borderline signal (%.0f%%) — waiting for re-confirmation", symbol, confidence * 100)
-            await self._notify_block(symbol, f"Borderline signal ({direction}, {confidence:.0%}) — venter på bekræftelse næste scan.")
+            await self._notify_block(symbol, f"Borderline signal ({direction}, {confidence:.0%}) — venter på bekræftelse næste scan.",
+                                      dedupe_key=f"borderline:{direction}:{setup_type}")
             return
 
         # Daily cap: 1 perfect trade per day — no second-guessing once we're in
         if await self._daily_cap_reached():
             log.info("Daily cap reached (1 trade/day) — skipping %s", symbol)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men dagens handel er allerede brugt (max {DAILY_TRADE_CAP}/dag).")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men dagens handel er allerede brugt (max {DAILY_TRADE_CAP}/dag).",
+                                      dedupe_key="daily_cap")
             return
 
         # Cooldown: don't repeat same direction within SIGNAL_COOLDOWN seconds
@@ -390,7 +405,8 @@ class MarketMonitor:
         last = self._last_signal.get(symbol, {})
         if last.get("direction") == direction and now - last.get("ts", 0) < SIGNAL_COOLDOWN:
             log.debug("[%s] Cooldown active, skipping", symbol)
-            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men cooldown aktiv efter sidste {direction}-signal.")
+            await self._notify_block(symbol, f"Signal fundet ({direction}, {confidence:.0%}), men cooldown aktiv efter sidste {direction}-signal.",
+                                      dedupe_key=f"cooldown:{direction}")
             return
 
         self._last_signal[symbol] = {"direction": direction, "ts": now}
