@@ -707,16 +707,53 @@ async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await auth(update):
         return
     try:
-        from core.trading.optimize import run_sweep
         await update.message.reply_text(
             "🧪 Parameter-optimering startet — tager 45-60 minutter. "
             "Du får en besked her når den er færdig med de bedste fundne indstillinger.\n\n"
             "_Rør ikke ved risikostyringen — kun signal-tærskler testes._",
             parse_mode="Markdown"
         )
-        asyncio.create_task(run_sweep(market_monitor.mt5))
+        asyncio.create_task(_run_optimize_and_notify(ctx))
     except Exception as e:
         await update.message.reply_text(f"Fejl: {e}")
+
+
+async def _run_optimize_and_notify(ctx: ContextTypes.DEFAULT_TYPE):
+    """run_sweep() just returns a dict -- previously fired via bare
+    asyncio.create_task() with the result discarded, so /optimize's promised
+    "you'll get a message when it's done" never actually happened; the user
+    would wait 45-60 minutes for nothing. This wraps it so a result (or a
+    failure) always reaches Telegram."""
+    from core.trading.optimize import run_sweep
+    try:
+        result = await run_sweep(market_monitor.mt5, progress=True)
+        lines = [f"✅ *Optimering færdig* — {result['combinations_tested']} kombinationer testet på "
+                 f"{', '.join(result['symbols_tested'])}\n"]
+        lines.append("*Top 3 samlet (alle symboler blandet):*")
+        for r in result["top_10"][:3]:
+            lines.append(
+                f"  conf≥{r['confidence_thresh']:.0%} SL={r['ATR_SL_MULT']}x TP={r['ATR_TP_MULT']}x "
+                f"confl={r['MIN_CONFLUENCE']} RR≥{r['MIN_RR']}: {r['win_rate']:.0%} WR, "
+                f"{r['avg_r']:+.2f}R/trade ({r['total_trades']} trades)"
+            )
+        lines.append("\n*Bedste fund per symbol:*")
+        for sym, res in result.get("top_5_by_symbol", {}).items():
+            if not res:
+                lines.append(f"  {sym}: for få trades til at vurdere sikkert")
+                continue
+            r = res[0]
+            lines.append(
+                f"  *{sym}*: conf≥{r['confidence_thresh']:.0%} SL={r['ATR_SL_MULT']}x TP={r['ATR_TP_MULT']}x "
+                f"→ {r['win_rate']:.0%} WR, {r['avg_r']:+.2f}R/trade ({r['total_trades']} trades)"
+            )
+        lines.append(
+            "\n_Disse tal er kun signal-kvalitet — risikostyring (position-størrelse, "
+            "daglig tab-grænse, drawdown-lås) er uændret og skal justeres separat via env-variabler._"
+        )
+        await ctx.bot.send_message(chat_id=ALLOWED_CHAT_ID, text="\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        log.exception("Optimize sweep failed")
+        await ctx.bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"⚠️ Optimering fejlede: {e}")
 
 
 async def cmd_lessons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
