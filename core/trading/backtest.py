@@ -21,7 +21,13 @@ from datetime import datetime, timezone
 from .market_monitor import _resample_4h, CONFIDENCE_THRESH
 from .signal_engine import score_signal
 
-WINDOW   = 200   # candles fed to score_signal at each step (matches live ~200-candle history)
+# 300, not 200: score_symbol() (core/trading/engine/scoring.py) hard-requires
+# >= 60 H4 candles, and _resample_4h() only produces 1 H4 candle per 4 H1
+# candles -- WINDOW=200 previously produced just 50 H4 candles, so EVERY
+# window failed the very first gate ("Utilstrækkelig candle-historik") and
+# backtests always reported 0 trades regardless of the market data.
+# 300 H1 candles -> 75 H4 candles, comfortably above the 60 floor.
+WINDOW   = 300   # candles fed to score_signal at each step
 MAX_HOLD = 200   # max candles to hold a simulated trade before giving up (counted as "no exit")
 
 
