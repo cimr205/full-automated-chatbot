@@ -76,42 +76,42 @@ MT5_SYMBOL_MAP = {
     "SI=F": "XAGUSD",
 }
 
-# Per-symbol parameter overrides derived from backtesting + known pair characteristics.
-# Global defaults (from 2026-06-24 56-combo sweep across 5 symbols):
-#   SL=1.0x ATR, TP=3.0x ATR, conf=0.68 → ~48% win rate, +0.93R/trade avg
+# Per-symbol parameter overrides.
 #
-# Pattern: tighter SL beats the global default on volatile/mean-reverting assets
-# (GC=F sweep confirmed 0.75x → +0.80R/trade); trending pairs benefit from wider TP.
-# GBPJPY requires higher confluence (4 vs 3) — "widow maker" pair, too many fakeouts
-# at the standard 3-factor bar. Nothing here overrides risk management.
+# 2026-09-03: EURUSD=X/GBPUSD=X/GC=F/USDJPY=X/GBPJPY=X entries below are from
+# a /optimize sweep run against the CURRENT dual-profile engine
+# (core/trading/engine/scoring.py) after fixing two bugs that had made every
+# previous sweep meaningless: backtest.py's WINDOW was too short to clear
+# scoring's own >=60-H4-candle gate (always 0 trades, see WINDOW history in
+# backtest.py), and optimize.py never passed symbol=/ohlcv_15m= into
+# simulate() so gold was scored with FOREX_PROFILE weights instead of its
+# own. Any entries below not covered by that sweep (GBPAUD, EURJPY, AUDJPY,
+# CADJPY, NZDUSD, NZDJPY, SI=F) are unchanged pre-rewrite guesses — treat
+# them as unvalidated until they get their own real sweep.
+#
+# Sample sizes here are small (19-23 trades per symbol, just above
+# optimize.MIN_SAMPLE_SIZE=15) — good enough to correct an obviously wrong
+# guess, not enough to be fully confident in. Re-run /optimize periodically
+# as more real history accumulates.
 SYMBOL_OVERRIDES = {
-    # Gold — actual 192-combo sweep: SL=0.75x beats 1.0x by +0.13R/trade
-    # (35.9% win rate, +0.80R/trade), tested against the TP=3.0x that was
-    # the global default at sweep time. atr_tp_mult pinned here explicitly:
-    # the 2026-06-26 change that raised the *global* ATR_TP_MULT default to
-    # 5.0 (to compensate for a much tighter 0.2x global SL) was silently
-    # inherited by GC=F too, since this entry never set its own TP — that
-    # produced a live 0.75x/5.0x combo (6.67:1 R:R) that was never actually
-    # backtested together and got 3 real trades stopped out on noise on
-    # 2026-07-28. Pin it to the pairing that was actually validated.
-    # min_confluence_short=4: bearish setups noticeably underperform bullish
-    # ones live (fvg 43% vs 60%, break_retest 31% vs 40%, pullback 4% vs 4%) —
-    # consistent with gold trending up overall, making shorts the counter-trend
-    # trade. Raise the bar for shorts specifically rather than gold as a whole.
-    "GC=F":    {"atr_sl_mult": 0.75, "atr_tp_mult": 3.0, "min_confluence_short": 4},
-    # GBP pairs — higher volatility, SMC setups hit TP faster → tighter SL, smaller TP
-    "GBPUSD=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 2.5},
-    "GBPJPY=X": {"atr_sl_mult": 1.25, "atr_tp_mult": 3.5, "min_confluence": 4},
+    # 47% WR, +1.19R/trade over 19 trades.
+    "GC=F":     {"confidence_thresh": 0.72, "atr_sl_mult": 1.0, "atr_tp_mult": 3.0},
+    "EURUSD=X": {"confidence_thresh": 0.65, "atr_sl_mult": 1.5, "atr_tp_mult": 2.0},   # 38% WR, +1.76R/trade, 21 trades
+    "GBPUSD=X": {"confidence_thresh": 0.60, "atr_sl_mult": 1.0, "atr_tp_mult": 2.0},   # 39% WR, +2.22R/trade, 23 trades
+    "USDJPY=X": {"confidence_thresh": 0.72, "atr_sl_mult": 1.5, "atr_tp_mult": 3.0},   # 50% WR, +0.85R/trade, 20 trades
+    # +4.28R/trade on 21 trades is a strong outlier vs. every other symbol
+    # here (2-4x the next-best) -- likely one or two oversized winners
+    # skewing a small sample rather than a robust edge (spec section 23:
+    # avoid curve-fitting to a single historical window). Kept the existing
+    # min_confluence=4 "widow maker" guard; do not raise position size on
+    # this pair based on the R/trade figure alone.
+    "GBPJPY=X": {"confidence_thresh": 0.65, "atr_sl_mult": 2.0, "atr_tp_mult": 3.0, "min_confluence": 4},
     "GBPAUD=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 2.5},
-    # JPY trending pairs — cleaner trends, let TP run further
-    "USDJPY=X": {"atr_tp_mult": 3.5},
     "EURJPY=X": {"atr_tp_mult": 3.5},
     "AUDJPY=X": {"atr_tp_mult": 3.5},
     "CADJPY=X": {"atr_tp_mult": 3.5},
-    # NZD pairs — lower liquidity, tighter SL to compensate for wider spreads
     "NZDUSD=X": {"atr_sl_mult": 0.85},
     "NZDJPY=X": {"atr_sl_mult": 0.85, "atr_tp_mult": 3.5},
-    # Silver — same logic as gold (high intraday volatility, mean-reverting)
     "SI=F":     {"atr_sl_mult": 0.75},
 }
 
